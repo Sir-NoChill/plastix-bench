@@ -33,7 +33,7 @@
 // because Network owns its GlobalState by value with no public setter;
 // see the README for the trade-off.
 
-#include "common.hpp"
+#include "plastix/common.hpp"
 
 #include <plastix/math.hpp>
 #include <plastix/plastix.hpp>

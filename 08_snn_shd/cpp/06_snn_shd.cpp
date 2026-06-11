@@ -29,7 +29,7 @@
 // Output schema (.history.jsonl + .summary.csv) matches the Plastix port
 // so the orchestrator picks the two up uniformly.
 
-#include "common.hpp"
+#include "cpp/common.hpp"
 
 #include <cblas.h>
 

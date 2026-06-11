@@ -28,7 +28,7 @@
 // threshold. The static lives entirely inside the benchmark .cpp; no
 // framework change is required.
 
-#include "common.hpp"
+#include "plastix/common.hpp"
 
 #include <plastix/math.hpp>
 #include <plastix/plastix.hpp>

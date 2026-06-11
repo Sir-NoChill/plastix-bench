@@ -11,8 +11,8 @@
 // physically (max_hidden x ...) up front; growth flips mask bits and seeds
 // the new weights, no realloc.
 
-#include "common.hpp"
-#include "mlp.hpp"
+#include "cpp/common.hpp"
+#include "cpp/mlp.hpp"
 
 #include <algorithm>
 #include <chrono>

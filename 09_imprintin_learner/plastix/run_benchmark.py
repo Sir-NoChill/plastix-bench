@@ -2,7 +2,7 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "_shared_python"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common/pytorch"))
 
 from cpp_wrapper import main  # noqa: E402
 

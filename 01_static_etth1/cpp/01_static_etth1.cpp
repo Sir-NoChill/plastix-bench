@@ -10,8 +10,8 @@
 // Loss reduction is *mean* (not PyTorch's sum) so the lr is tuned for the
 // mean-reduction setting; see HP::Lr below.
 
-#include "common.hpp"
-#include "mlp.hpp"
+#include "cpp/common.hpp"
+#include "cpp/mlp.hpp"
 
 #include <algorithm>
 #include <chrono>

@@ -20,7 +20,7 @@
 // Sizing: 2500 input units, 1 output, with headroom for ~10× generated units
 // (capacity 16384 / 524288) under the τ < η gate that throttles growth.
 
-#include "common.hpp"
+#include "plastix/common.hpp"
 #include "../cpp/examples/dataset.hpp"
 
 #include <plastix/alloc.hpp>

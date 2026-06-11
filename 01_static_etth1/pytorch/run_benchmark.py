@@ -38,7 +38,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "_shared_python"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common/pytorch"))
 from common import (  # noqa: E402
     PHASE_COLUMNS,
     PhaseTimer,

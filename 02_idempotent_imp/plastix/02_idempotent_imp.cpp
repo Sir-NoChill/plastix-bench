@@ -26,7 +26,7 @@
 //   4. Disarm; finetune via N.DoStep(...) for Ef epochs.
 //   5. Repeat until a round kills no edges.
 
-#include "common.hpp"
+#include "plastix/common.hpp"
 
 #include <plastix/math.hpp>
 #include <plastix/plastix.hpp>

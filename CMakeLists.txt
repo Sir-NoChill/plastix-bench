@@ -2,9 +2,9 @@
 #
 # Layout:
 #   <bench>/{pytorch,plastix,cpp}/...
-#   _shared_plastix/common.hpp     shared headers + helpers (Plastix impls)
-#   _shared_cpp/{common.hpp, mlp.hpp}    used by C++ / OpenBLAS impls.
-#   _shared_python/common.py             used by Python impls.
+#   common/plastix/common.hpp            shared headers + helpers (Plastix impls)
+#   common/cpp/{common.hpp, mlp.hpp}     used by C++ / OpenBLAS impls.
+#   common/pytorch/common.py             used by Python impls.
 #
 # The per-benchmark wiring (target naming, include dirs, output paths,
 # symlink fallback) lives in cmake/PlastixBench.cmake — this file is just an
@@ -87,9 +87,10 @@ foreach(BENCH ${_BENCHMARK_DIRS})
     if(NOT IS_DIRECTORY ${_bench_dir})
         continue()
     endif()
-    # Skip shared / metadata directories (leading underscore convention).
+    # Skip shared / metadata directories: the leading-underscore convention
+    # plus the shared `common/` and `cmake/` trees.
     string(SUBSTRING ${BENCH} 0 1 _LEAD)
-    if(_LEAD STREQUAL "_")
+    if(_LEAD STREQUAL "_" OR BENCH STREQUAL "common" OR BENCH STREQUAL "cmake")
         continue()
     endif()
 
@@ -118,7 +119,7 @@ foreach(BENCH ${_BENCHMARK_DIRS})
             set(_target cpp_${BENCH})
             add_executable(${_target} ${_il_src})
             target_include_directories(${_target} PRIVATE
-                ${PLASTIX_BENCH_SHARED_CPP}
+                ${PLASTIX_BENCH_COMMON}
                 ${_bench_dir}/cpp
                 ${_bench_dir}/cpp/examples)
             target_link_libraries(${_target} PRIVATE il::agent)

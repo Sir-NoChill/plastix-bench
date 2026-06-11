@@ -118,15 +118,23 @@ plot-kind list (`accuracy`, `overlay`, `walltime`, `memory`, `phases`,
 ```
 <bench>/<impl>/run_benchmark.py     sentinel (Python trainer or thin exec)
 <bench>/<impl>/<bench>.cpp          C++ source (for cpp/plastix impls)
-_shared_python/common.py            Python helpers: StructuralLog,
-                                    PhaseTimer, output paths
-_shared_python/cpp_wrapper.py       sentinel that execs the compiled binary
-_shared_cpp/common.hpp              raw-C++ helpers: CliArgs,
-                                    SummaryWriter, PhaseTimer
-_shared_plastix/common.hpp          Plastix-side equivalents (CliArgs,
-                                    edge-set utilities, PhaseTimer)
+common/                             shared utilities, on the C++ include path
+  cpp/{common.hpp, mlp.hpp}         raw-C++ helpers: CliArgs, SummaryWriter,
+                                    PhaseTimer  ->  #include "cpp/common.hpp"
+  plastix/common.hpp                Plastix-side equivalents (CliArgs, edge-set
+                                    utilities, PhaseTimer) -> "plastix/common.hpp"
+  pytorch/common.py                 Python helpers: StructuralLog, PhaseTimer,
+                                    output paths
+  pytorch/cpp_wrapper.py            sentinel that execs the compiled binary
+  pytorch/data/                     datasets fetched by setup.py (git-ignored)
 cmake/PlastixBench.cmake            per-bench target wiring + binary paths
 ```
+
+C++ implementations include their framework's shared header by its `common/`
+sub-path — `#include "cpp/common.hpp"` (and `"cpp/mlp.hpp"`) for the OpenBLAS
+impls, `#include "plastix/common.hpp"` for the Plastix impls — since the helper
+puts `common/` on the include path. Python sentinels add `common/pytorch` to
+`sys.path`.
 
 A bench is discovered automatically: drop `run_benchmark.py` in
 `<bench>/<impl>/`, and the orchestrator's glob picks it up. C++ binaries are
@@ -139,7 +147,7 @@ library link).
 
 Every training inner loop wraps its `forward` / `loss` / `backward` /
 `update` / `structural` / `reset` phases with a `PhaseTimer` (both languages
-ship one — see `_shared_{python,cpp,plastix}/common.{py,hpp}`). The timer uses
+ship one — see `common/{pytorch,cpp,plastix}/common.{py,hpp}`). The timer uses
 Welford's online algorithm so the per-run summary CSV carries **mean + std**
 for each phase plus `step_count`, `step_ns_mean`, and `other_ns_mean` (slack
 that the phase marks don't cover). The orchestrator also polls

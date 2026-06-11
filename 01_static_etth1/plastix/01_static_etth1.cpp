@@ -21,7 +21,7 @@
 // ~280k connections). The allocator capacity is bumped via the per-traits
 // UnitCapacity / ConnCapacity overrides.
 
-#include "common.hpp"
+#include "plastix/common.hpp"
 
 #include <plastix/math.hpp>
 #include <plastix/plastix.hpp>

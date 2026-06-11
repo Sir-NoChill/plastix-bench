@@ -14,7 +14,7 @@
 // `bench::StructuralLog`, `bench::SummaryWriter`) is shared with every other
 // `cpp/` impl in this directory.
 
-#include "common.hpp"
+#include "cpp/common.hpp"
 
 #include "dataset.hpp"
 #include "imprinting/imprinting_learner.hpp"

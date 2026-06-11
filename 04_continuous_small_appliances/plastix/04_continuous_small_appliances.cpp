@@ -30,7 +30,7 @@
 //                                neighbourhood sweep).
 //   ResetGlobal        NoX
 
-#include "common.hpp"
+#include "plastix/common.hpp"
 
 #include <plastix/math.hpp>
 #include <plastix/plastix.hpp>

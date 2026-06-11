@@ -28,7 +28,7 @@
 // so the per-step cost is bounded by what Plastix's per-conn dispatch can
 // actually deliver on a single core.
 
-#include "common.hpp"
+#include "plastix/common.hpp"
 
 #include <plastix/math.hpp>
 #include <plastix/plastix.hpp>

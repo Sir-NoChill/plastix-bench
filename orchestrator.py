@@ -17,7 +17,7 @@ Each per-bench `summary.csv` carries:
   * headline numbers: workload, wall_seconds, test_*, n_units, n_edges
   * per-phase ns/step (forward/loss/backward/update/structural/reset),
     each with mean **and standard deviation** across all optimisation
-    steps. See _shared_{cpp,plastix,python}/common.{hpp,py} for the
+    steps. See common/{cpp,plastix,pytorch}/common.{hpp,py} for the
     shared `PhaseTimer` that produces them.
 
 `runs.csv` carries one row per (bench, impl, tag) run and hoists the
@@ -105,12 +105,16 @@ class Sentinel:
     path: Path                # the run_benchmark.py file
 
 
+_NON_BENCH_DIRS = {"common", "cmake"}
+
+
 def discover(root: Path = HERE) -> list[Sentinel]:
     """Walk the suite root and find every <bench>/<impl>/run_benchmark.py.
-    Skips dirs whose name starts with `_` (shared / metadata / cache)."""
+    Skips dirs whose name starts with `_` plus the shared `common`/`cmake`
+    trees (metadata / cache / shared utilities)."""
     out: list[Sentinel] = []
     for bench_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        if bench_dir.name.startswith("_"):
+        if bench_dir.name.startswith("_") or bench_dir.name in _NON_BENCH_DIRS:
             continue
         for impl_dir in sorted(p for p in bench_dir.iterdir() if p.is_dir()):
             if impl_dir.name.startswith("_") or impl_dir.name == "__pycache__":

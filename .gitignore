@@ -15,7 +15,7 @@ __pycache__/
 
 # Datasets + soundfonts + generated artifacts — fetched by setup.py, never
 # committed (see README "Setup").
-/_shared_python/data/
+/common/pytorch/data/
 *.sf2
 *.sf3
 /09_imprintin_learner/cpp/examples/output/

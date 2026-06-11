@@ -23,7 +23,7 @@
 // The sine task here is the same noisy-sine smoke task the Python ccwc port
 // uses for its first-passing check — train MSE must decrease across epochs.
 
-#include "common.hpp"
+#include "plastix/common.hpp"
 
 #include <plastix/math.hpp>
 #include <plastix/plastix.hpp>

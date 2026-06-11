@@ -28,7 +28,7 @@ import numpy as np
 
 # common.py lives one dir up.
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parents[1] / "_shared_python"))
+sys.path.insert(0, str(HERE.parents[1] / "common/pytorch"))
 
 from common import (  # noqa: E402
     StructuralLog,

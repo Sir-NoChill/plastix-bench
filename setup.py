@@ -18,7 +18,7 @@ Usage:
     uv run python setup.py                     # everything except audio gen
     uv run python setup.py --all               # everything, incl. audio
     uv run python setup.py --stages csvs,soundfont
-    uv run python setup.py --data-dir _shared_python/data --skip mnist
+    uv run python setup.py --data-dir common/pytorch/data --skip mnist
 
 The `audio` stage additionally needs a system FluidSynth (its Python deps come
 from the 09_imprintin_learner/cpp/examples/ sub-project, run via uv):
@@ -36,7 +36,7 @@ import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_DATA_DIR = HERE / "_shared_python" / "data"
+DEFAULT_DATA_DIR = HERE / "common/pytorch" / "data"
 EXAMPLES_DIR = HERE / "09_imprintin_learner" / "cpp" / "examples"
 
 # Dataset URLs — mirror the constants in each bench's pytorch/run_benchmark.py.

@@ -41,7 +41,7 @@
 // Output schema (.history.jsonl + .summary.csv) mirrors the other ports so the
 // orchestrator can drive all three uniformly.
 
-#include "common.hpp"
+#include "cpp/common.hpp"
 
 #include <algorithm>
 #include <chrono>

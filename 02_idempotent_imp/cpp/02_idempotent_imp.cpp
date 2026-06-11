@@ -12,8 +12,8 @@
 // per-layer Linear biases. Loss reduction is mean cross-entropy; the lr is
 // tuned for that (effectively PyTorch_sum_lr * batch * D_logits).
 
-#include "common.hpp"
-#include "mlp.hpp"
+#include "cpp/common.hpp"
+#include "cpp/mlp.hpp"
 
 #include <algorithm>
 #include <chrono>

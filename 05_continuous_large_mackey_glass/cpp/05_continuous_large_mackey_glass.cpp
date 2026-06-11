@@ -10,8 +10,8 @@
 // Architecture: in -> H (tanh) + recurrent H -> H (sparse) -> tanh -> out
 // (linear). Recurrent block is one ESN-style update per forward pass.
 
-#include "common.hpp"
-#include "mlp.hpp"
+#include "cpp/common.hpp"
+#include "cpp/mlp.hpp"
 
 #include <algorithm>
 #include <chrono>

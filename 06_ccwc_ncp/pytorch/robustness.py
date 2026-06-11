@@ -25,7 +25,7 @@ import numpy as np
 import torch
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parents[1] / "_shared_python"))
+sys.path.insert(0, str(HERE.parents[1] / "common/pytorch"))
 sys.path.insert(0, str(HERE))
 
 from common import resolve_device  # noqa: E402

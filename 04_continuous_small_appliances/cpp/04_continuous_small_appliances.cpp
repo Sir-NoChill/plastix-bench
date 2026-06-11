@@ -9,8 +9,8 @@
 // Pre-allocate max + mask: the hidden width is physically MaxHidden up front;
 // "splitting" a unit flips mask bits and seeds new weights, no realloc.
 
-#include "common.hpp"
-#include "mlp.hpp"
+#include "cpp/common.hpp"
+#include "cpp/mlp.hpp"
 
 #include <algorithm>
 #include <chrono>

@@ -23,7 +23,7 @@
 # mirroring the source layout <BENCH>/<IMPL>/). On multi-config generators
 # the helper stamps a symlink so the path stays stable.
 #
-# Shared include dirs (`_shared_plastix/`, `_shared_cpp/`) are added by the
+# Shared include dirs (`common/plastix/`, `common/cpp/`) are added by the
 # helper rather than by each caller — that keeps the top-level CMakeLists to
 # one line per benchmark.
 
@@ -33,8 +33,10 @@ if(NOT DEFINED PLASTIX_BENCH_ROOT)
         "file (point it at the suite root directory)")
 endif()
 
-set(PLASTIX_BENCH_SHARED_PLASTIX ${PLASTIX_BENCH_ROOT}/_shared_plastix)
-set(PLASTIX_BENCH_SHARED_CPP ${PLASTIX_BENCH_ROOT}/_shared_cpp)
+# The shared utilities live under common/{cpp,plastix,pytorch}. Putting the
+# common/ root on the include path lets each framework include its own header
+# explicitly, e.g. `#include "cpp/common.hpp"` or `#include "plastix/common.hpp"`.
+set(PLASTIX_BENCH_COMMON ${PLASTIX_BENCH_ROOT}/common)
 
 
 # ----------------------------------------------------------------------------
@@ -67,7 +69,7 @@ function(plastix_add_plastix_bench BENCH SRC)
     set(_target plastix_${BENCH})
     add_executable(${_target} ${SRC})
     target_include_directories(${_target} PRIVATE
-        ${PLASTIX_BENCH_SHARED_PLASTIX}
+        ${PLASTIX_BENCH_COMMON}
         ${PLASTIX_BENCH_ROOT}/${BENCH}/plastix)
     target_link_libraries(${_target} PRIVATE plastix::plastix)
     target_compile_options(${_target} PRIVATE -Wall -Wextra -Wpedantic)
@@ -93,7 +95,7 @@ function(plastix_add_cpp_bench BENCH SRC)
     set(_target cpp_${BENCH})
     add_executable(${_target} ${SRC})
     target_include_directories(${_target} PRIVATE
-        ${PLASTIX_BENCH_SHARED_CPP}
+        ${PLASTIX_BENCH_COMMON}
         ${PLASTIX_BENCH_ROOT}/${BENCH}/cpp)
     if(OPENBLAS_FOUND)
         target_link_libraries(${_target} PRIVATE PkgConfig::OPENBLAS)
