@@ -1,0 +1,18 @@
+The SwiftTD algorithm and its reference C++ implementation are the work of
+Khurram Javed, Arsalan Sharifnassab, and Richard S. Sutton.
+
+Upstream:  https://github.com/khurramjaved96/SwiftTD
+Paper:     https://khurramjaved.com/swifttd.pdf
+License:   MIT (see ./LICENSE)
+Vendored:  src/cpp/{SwiftTD.h,SwiftTD.cpp} from upstream commit 36ec2de ("Version bump").
+
+If you use this work, please cite:
+
+@article{javed2024swifttd,
+    title={{SwiftTD}: {A} Fast and Robust Algorithm for Temporal Difference Learning},
+    author={Javed, Khurram and Sharifnassab, Arsalan and Sutton, Richard S.},
+    journal={Reinforcement Learning Journal},
+    volume={2},
+    pages={840--863},
+    year={2024}
+}

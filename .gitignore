@@ -1,0 +1,16 @@
+# Build trees
+/build*/
+**/build/
+_il_subproject/
+
+# CMake leftovers
+compile_commands.json
+CMakeUserPresets.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Superseded doc/script backups
+*.bak

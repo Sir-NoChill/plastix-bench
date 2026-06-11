@@ -1,0 +1,6 @@
+pretty-midi
+pyfluidsynth
+numpy
+scipy
+soundfile
+matplotlib
