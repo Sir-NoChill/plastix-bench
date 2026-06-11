@@ -11,6 +11,18 @@ CMakeUserPresets.json
 __pycache__/
 *.py[cod]
 .venv/
+**/venv/
+
+# Datasets + soundfonts + generated artifacts — fetched by setup.py, never
+# committed (see README "Setup").
+/_shared_python/data/
+*.sf2
+*.sf3
+/09_imprintin_learner/cpp/examples/output/
+
+# Regenerable training checkpoints emitted under _results/.
+*.ckpt.pt
+*.ckpt
 
 # Superseded doc/script backups
 *.bak

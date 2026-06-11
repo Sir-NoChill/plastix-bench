@@ -15,8 +15,42 @@ trajectories are directly comparable.
 - **Plastix** — discovered via `find_package(plastix)` or built from source
   (see below).
 - **Python ≥ 3.10** with `uv` for the orchestrator and the `pytorch/`
-  implementations. Dependencies (`numpy`, `scipy`, `matplotlib`, `torch`)
-  are declared in `pyproject.toml`; `uv run` provisions them automatically.
+  implementations. Dependencies are declared in `pyproject.toml`; `uv run`
+  provisions them automatically.
+
+## Setup — datasets and soundfonts
+
+Datasets and soundfonts are **not committed to git** (see `.gitignore`). Fetch
+them with the setup pipeline, which downloads each artifact through the same
+path the benchmarks use and is idempotent (re-runs skip what already exists):
+
+```bash
+uv run python setup.py            # CSVs, MNIST, SHD (+.plxbin cache), soundfont
+uv run python setup.py --help     # stage list and options
+```
+
+Stages (`--stages a,b,...` to select, `--skip a,b` to exclude):
+
+| Stage | Benches | What it fetches |
+|---|---|---|
+| `csvs` | 01, 03, 04 | ETTh1 / elec2 / appliances CSVs |
+| `mnist` | 06 | sequential MNIST (torchvision) |
+| `shd` | 08 | Spiking Heidelberg Digits (tonic) + the `.plxbin` cache the C++ bench reads |
+| `soundfont` | 09 | `FluidR3_GM.sf2` (~140 MB) for the audio-prediction dataset |
+| `audio` | 09 | synthesise `09_imprintin_learner/.../output/dataset.bin` |
+
+By default everything **except `audio`** runs (the SHD download is several GB).
+The `audio` stage needs a **system FluidSynth** (the Python bindings come from
+the `09_imprintin_learner/cpp/examples/` sub-project, which the stage runs via
+`uv`); invoke it explicitly:
+
+```bash
+# Arch: sudo pacman -S fluidsynth   |   Debian: sudo apt install fluidsynth
+uv run python setup.py --stages soundfont,audio
+```
+
+If FluidSynth is missing, the `audio` stage prints install instructions and
+skips rather than failing.
 
 ## Building the C++ binaries
 
