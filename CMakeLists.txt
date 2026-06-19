@@ -101,30 +101,60 @@ endif()
 # ----------------------------------------------------------------------------
 # Plastix dependency.
 #
-# Preferred: an installed Plastix discovered via find_package (point
-# CMAKE_PREFIX_PATH at its install prefix). Falls back to building Plastix
-# from source — a local checkout via -DPLASTIX_SOURCE_DIR=/path/to/plastix,
-# otherwise fetched from upstream. Either way the imported target is
-# `plastix::plastix`.
+# Resolution order:
+#   1. CMAKE_OVERRIDE_PLASTIX=/path/to/plastix — build that checkout from
+#      source, overriding any installed package. Use this to benchmark a new
+#      version of the library against the current suite.
+#   2. An installed Plastix discovered via find_package (the oracle; point
+#      CMAKE_PREFIX_PATH at its install prefix).
+#   3. Fallback: build from source — a local checkout via
+#      -DPLASTIX_SOURCE_DIR=/path/to/plastix, otherwise fetched from upstream.
+#
+# Either way the consumable target is `plastix::plastix` (the alias below
+# backfills it for from-source builds that only define the plain `plastix`).
 # ----------------------------------------------------------------------------
-find_package(plastix CONFIG QUIET)
-if(NOT plastix_FOUND)
-    include(FetchContent)
-    # Plastix's own tests/examples/benchmarks are irrelevant here; build only
-    # the library so the fetch stays cheap.
+# Building Plastix from source: we only need the library — its own
+# tests/examples/benchmarks pull extra deps and define competing harnesses.
+macro(_plastix_bench_disable_extras)
     set(PLASTIX_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(PLASTIX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(PLASTIX_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
-    if(PLASTIX_SOURCE_DIR)
-        message(STATUS "plastix-bench: building Plastix from ${PLASTIX_SOURCE_DIR}")
-        FetchContent_Declare(plastix SOURCE_DIR "${PLASTIX_SOURCE_DIR}")
-    else()
-        message(STATUS "plastix-bench: fetching Plastix from upstream git")
-        FetchContent_Declare(plastix
-            GIT_REPOSITORY https://github.com/dhanrajhira/plastix.git
-            GIT_TAG master)
+endmacro()
+
+if(CMAKE_OVERRIDE_PLASTIX)
+    get_filename_component(_plastix_override_dir "${CMAKE_OVERRIDE_PLASTIX}"
+                           ABSOLUTE BASE_DIR "${CMAKE_BINARY_DIR}")
+    if(NOT EXISTS "${_plastix_override_dir}/CMakeLists.txt")
+        message(FATAL_ERROR
+            "CMAKE_OVERRIDE_PLASTIX=${CMAKE_OVERRIDE_PLASTIX} does not point at "
+            "a CMake project (no CMakeLists.txt found at ${_plastix_override_dir}).")
     endif()
-    FetchContent_MakeAvailable(plastix)
+    message(STATUS "plastix-bench: overriding plastix with source at ${_plastix_override_dir}")
+    _plastix_bench_disable_extras()
+    add_subdirectory("${_plastix_override_dir}" _plastix_override)
+else()
+    find_package(plastix CONFIG QUIET)
+    if(NOT plastix_FOUND)
+        include(FetchContent)
+        _plastix_bench_disable_extras()
+        if(PLASTIX_SOURCE_DIR)
+            message(STATUS "plastix-bench: building Plastix from ${PLASTIX_SOURCE_DIR}")
+            FetchContent_Declare(plastix SOURCE_DIR "${PLASTIX_SOURCE_DIR}")
+        else()
+            message(STATUS "plastix-bench: fetching Plastix from upstream git")
+            FetchContent_Declare(plastix
+                GIT_REPOSITORY https://github.com/dhanrajhira/plastix.git
+                GIT_TAG master)
+        endif()
+        FetchContent_MakeAvailable(plastix)
+    endif()
+endif()
+
+# A from-source plastix (override or FetchContent) may only define the plain
+# `plastix` target, while the bench links `plastix::plastix`. Backfill the
+# namespaced alias so both consumption modes are uniform.
+if(TARGET plastix AND NOT TARGET plastix::plastix)
+    add_library(plastix::plastix ALIAS plastix)
 endif()
 
 # Make the shared bench helpers available; they expect PLASTIX_BENCH_ROOT to
