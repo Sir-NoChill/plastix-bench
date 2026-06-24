@@ -1,24 +1,24 @@
 """Export the audio-prediction dataset to a packed binary file for the C++ benchmark.
 
-The C++ side reads each step as:
+The C++ side reads each step as a packed bit-vector of obs_dim bits plus a
+reward, where obs_dim = n_freq_bins * n_mag_bins is configurable (the "boxes").
 
-    struct Step {
-        std::bitset<2500> observation;
-        int8_t            reward;
-    };
+Wire format (little-endian), format version 2:
 
-Wire format (little-endian):
-
-    Header (16 bytes)
+    Header (24 bytes)
         offset  0:  4 bytes   magic "APBD"  (Audio-Prediction Benchmark Data)
-        offset  4:  uint32    format version (currently 1)
+        offset  4:  uint32    format version (2; readers also accept v1)
         offset  8:  uint64    n_steps  (number of Step records that follow)
+        offset 16:  uint64    obs_dim  (= n_freq_bins * n_mag_bins)
 
-    Record (314 bytes per step, repeated n_steps times)
-        offset  0:  313 bytes packed bits, LSB-first
+    Record (packed_bytes + 1 per step, repeated n_steps times)
+        offset  0:  packed_bytes = ceil(obs_dim/8) bytes packed bits, LSB-first
                     byte k, bit j  ->  observation index (8*k + j)
-                    the last 4 bits of byte 312 are unused and zero
-        offset  313: int8     reward in {-1, 0, +1}
+                    trailing bits in the final byte are unused and zero
+        offset packed_bytes: int8  reward in {-1, 0, +1}
+
+    (Version 1 is the legacy format: a 16-byte header with no obs_dim field;
+     obs_dim is implicitly 2500. Readers still load v1 files.)
 
 The LSB-first packing is chosen so that ``bs.test(i)`` on the C++ side equals
 the i-th element of the original numpy observation. See the docstring of
@@ -42,24 +42,24 @@ from audio_prediction_benchmark import AudioPredictionDataset
 from audio_prediction_benchmark import generate as apb_generate
 
 
-OBS_DIM = 2500              # n_freq_bins (50) * n_mag_bins (50)
-PACKED_BYTES = (OBS_DIM + 7) // 8  # 313
-RECORD_BYTES = PACKED_BYTES + 1    # 314 (+1 for int8 reward)
-
 MAGIC = b"APBD"
-VERSION = 1
-HEADER_STRUCT = struct.Struct("<4sIQ")  # magic, version, n_steps
-assert HEADER_STRUCT.size == 16
+VERSION = 2
+# v2 header: magic, version, n_steps, obs_dim. obs_dim = n_freq_bins * n_mag_bins,
+# so the box count is whatever the spectrum decomposition produces — readers
+# pick it up from the header and size their record stride accordingly.
+HEADER_STRUCT = struct.Struct("<4sIQQ")  # magic, version, n_steps, obs_dim
+assert HEADER_STRUCT.size == 24
 
 
-def pack_observation(obs: np.ndarray) -> bytes:
-    """Pack a length-2500 {0,1} vector into 313 LSB-first bytes."""
-    if obs.shape != (OBS_DIM,):
-        raise ValueError(f"Expected observation of shape ({OBS_DIM},), got {obs.shape}")
+def pack_observation(obs: np.ndarray, obs_dim: int) -> bytes:
+    """Pack a length-obs_dim {0,1} vector into ceil(obs_dim/8) LSB-first bytes."""
+    if obs.shape != (obs_dim,):
+        raise ValueError(f"Expected observation of shape ({obs_dim},), got {obs.shape}")
     # np.packbits with bitorder='little' packs obs[8k + j] into byte k, bit j (LSB-first).
     packed = np.packbits(obs.astype(np.uint8), bitorder="little")
-    if packed.shape != (PACKED_BYTES,):
-        raise RuntimeError(f"Packed shape {packed.shape}, expected ({PACKED_BYTES},)")
+    expected = (obs_dim + 7) // 8
+    if packed.shape != (expected,):
+        raise RuntimeError(f"Packed shape {packed.shape}, expected ({expected},)")
     return packed.tobytes()
 
 
@@ -125,11 +125,11 @@ def main():
     )
     args, passthrough = parser.parse_known_args()
 
-    if args.n_freq_bins * args.n_mag_bins != OBS_DIM:
-        parser.error(
-            f"n_freq_bins * n_mag_bins must equal {OBS_DIM} to match std::bitset<{OBS_DIM}>, "
-            f"got {args.n_freq_bins * args.n_mag_bins}"
-        )
+    obs_dim = args.n_freq_bins * args.n_mag_bins
+    if obs_dim <= 0:
+        parser.error("n_freq_bins and n_mag_bins must both be positive")
+    packed_bytes = (obs_dim + 7) // 8
+    record_bytes = packed_bytes + 1
 
     if args.generate:
         gen_args = list(passthrough)
@@ -154,20 +154,22 @@ def main():
         max_magnitude=args.max_magnitude,
     )
     n_steps = len(dataset)
-    print(f"Dataset has {n_steps} steps; writing binary to {output_path}")
+    print(f"Dataset has {n_steps} steps (obs_dim={obs_dim} = "
+          f"{args.n_freq_bins} freq x {args.n_mag_bins} mag bins); "
+          f"writing binary to {output_path}")
 
     start = time.time()
     # Write header first; we know n_steps up front so no need for a backpatch.
     with open(output_path, "wb") as f:
-        f.write(HEADER_STRUCT.pack(MAGIC, VERSION, n_steps))
+        f.write(HEADER_STRUCT.pack(MAGIC, VERSION, n_steps, obs_dim))
 
         # Reusable buffer per record to avoid per-step allocations.
-        record = bytearray(RECORD_BYTES)
+        record = bytearray(record_bytes)
         for t in range(n_steps):
             obs, reward = dataset[t]
-            record[:PACKED_BYTES] = pack_observation(obs)
-            # struct.pack_into writes int8 (signed) at offset PACKED_BYTES.
-            struct.pack_into("<b", record, PACKED_BYTES, encode_reward(reward))
+            record[:packed_bytes] = pack_observation(obs, obs_dim)
+            # struct.pack_into writes int8 (signed) at offset packed_bytes.
+            struct.pack_into("<b", record, packed_bytes, encode_reward(reward))
             f.write(record)
 
             if args.progress_every and (t + 1) % args.progress_every == 0:
@@ -177,7 +179,7 @@ def main():
                 print(f"  step {t + 1}/{n_steps}  ({rate:.0f} steps/s, ETA {eta:.0f}s)")
 
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
-    expected = HEADER_STRUCT.size + n_steps * RECORD_BYTES
+    expected = HEADER_STRUCT.size + n_steps * record_bytes
     actual = os.path.getsize(output_path)
     if actual != expected:
         raise RuntimeError(f"File size mismatch: wrote {actual}, expected {expected}")

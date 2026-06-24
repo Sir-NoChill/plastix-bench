@@ -128,7 +128,9 @@ int main(int Argc, char **Argv) {
   auto Returns = ComputeReturns(Rewards, H.Gamma);
 
   il::HyperParams Hp;
-  Hp.capacity = 16384;
+  // Feature-arena capacity. Tunable for large-scale runs (e.g. the ~1M-neuron
+  // sweep: --capacity 1100000). Defaults to the cross-impl 16384.
+  Hp.capacity = static_cast<size_t>(Args.GetInt("capacity", 16384));
   Hp.trace_dim = 1;
   Hp.tenure_threshold = 0.01f;
   Hp.tenure_track_threshold = 3e-4f;
@@ -154,13 +156,13 @@ int main(int Argc, char **Argv) {
   Hp.epsilon_z = H.EpsilonZ;
 
   il::ImprintingLearner Learner(Hp);
-  Learner.addObservations(audio_pred::ObservationDim);
+  Learner.addObservations(DS.ObservationDim());
 
   auto [HistPath, SummaryPath, LogPath] =
       bench::OutputPaths(Args, "audio_imprinting");
   bench::StructuralLog Log(HistPath);
 
-  std::array<uint8_t, audio_pred::ObservationDim> Obs{};
+  std::vector<uint8_t> Obs(DS.ObservationDim(), uint8_t{0});
   std::vector<float> Predictions(N, 0.0f);
 
   // Running-window MSE inside the current "epoch" (length LogEvery). We log
@@ -174,7 +176,7 @@ int main(int Argc, char **Argv) {
   auto T0 = std::chrono::steady_clock::now();
   for (size_t T = 0; T < N; ++T) {
     const audio_pred::StepView Step = DS[T];
-    for (size_t I = 0; I < audio_pred::ObservationDim; ++I)
+    for (size_t I = 0; I < DS.ObservationDim(); ++I)
       Obs[I] = Step.Test(I) ? uint8_t{1} : uint8_t{0};
     float V = Learner.step(Obs, static_cast<float>(Step.Reward()));
     Predictions[T] = V;
