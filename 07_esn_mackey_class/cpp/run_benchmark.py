@@ -27,10 +27,10 @@ def main() -> None:
     p.add_argument("--quick", action="store_true")
     args, _ignored = p.parse_known_args()
 
-    # Locate the binary using the same layout convention as cpp_wrapper.
-    parts = HERE.parts
-    idx = parts.index("traditional")
-    binary = args.build_dir.resolve() / Path(*parts[idx:]) / "run_benchmark"
+    # Locate the binary using the same layout convention as cpp_wrapper:
+    # <build_dir>/<bench>/<impl>/run_benchmark.
+    rel = Path(*HERE.parts[-2:])     # <bench>/<impl>
+    binary = args.build_dir.resolve() / rel / "run_benchmark"
     if not binary.exists():
         raise SystemExit(f"esn binary missing: {binary}")
 
@@ -81,7 +81,8 @@ def main() -> None:
         with src.open() as f:
             row = next(csv.DictReader(f), {})
         wall_s = row.get("wall_seconds", f"{wall:.6f}")
-        test_v = (row.get("test_nrmse")
+        test_v = (row.get("test_rmse")
+                  or row.get("test_nrmse")
                   or row.get("test_mse")
                   or row.get("nrmse")
                   or "")
