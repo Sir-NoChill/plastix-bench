@@ -24,9 +24,17 @@
 #include "../cpp/examples/dataset.hpp"
 
 #include <plastix/alloc.hpp>
+#include <plastix/device_atomics.hpp>
+#include <plastix/device_rng.hpp>
+#include <plastix/macros.hpp>
 #include <plastix/plastix.hpp>
+#include <plastix/reverse_adjacency.hpp>
 #include <plastix/traits.hpp>
 #include <plastix/unit_state.hpp>
+
+#ifdef __CUDA_ARCH__
+#include <cuda_runtime.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -63,6 +71,17 @@ struct Pulse {};
 struct Delay {};
 struct ActThreshold {};
 struct Tenure {};
+struct InDegreeTag {}; // per-unit incoming-edge count (for on-device forward)
+
+// Atomic-or-plain global accumulate: kernels run many threads into the shared
+// GlobalState, so on-device these reductions must be atomic; on host the same
+// policy code runs serially and a plain += is correct (and faster).
+// Global reductions over edges (G.Tau/G.B/G.VDelta) all target one scalar; use
+// the warp-aggregated atomic to avoid the per-edge serialization that profiling
+// showed was ~99% of the on-device update phase.
+PLASTIX_HD void AtomicAddGlobal(float &Dst, float Val) {
+  plastix::WarpAtomicAdd(Dst, Val);
+}
 
 struct UnitFlags {
   bool InputsAdded = false;
@@ -111,37 +130,34 @@ struct ImprintingLearnerConnInit {
 };
 
 struct ImprintingLearnerForward {
-  struct Acc {
-    float Activation = 0;
-    int NumConns = 0;
-  };
-  using Accumulator = Acc;
-  static Acc Map(auto &U, size_t, size_t SrcId, auto &C, size_t ConnId,
-                 auto &) {
-    return {plastix::GetWeight(C, ConnId) * plastix::GetActivation(U, SrcId),
-            1};
+  // float accumulator (= Σ w·act) so the GPU forward path (which requires
+  // Accumulator==float) activates. The per-unit connection count that the old
+  // struct accumulator carried is precomputed once into the InDegree unit
+  // field (via the reverse-adjacency), so the pattern threshold (avg = Σ/n)
+  // still works on-device.
+  using Accumulator = float;
+  PLASTIX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
+                              size_t ConnId, auto &) {
+    return plastix::GetWeight(C, ConnId) * plastix::GetActivation(U, SrcId);
   }
-  static Acc Combine(Acc A, Acc B) {
-    return {A.Activation + B.Activation, A.NumConns + B.NumConns};
-  }
-  static void Apply(auto &U, size_t Id, auto &G, Acc A) {
+  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &G, float Activation) {
     UnitKind Kind = plastix::GetField<UKindTag>(U, Id);
     if (Kind == UK_Output) {
-      plastix::GetActivation(U, Id) = A.Activation;
-      G.V = A.Activation;
+      plastix::GetActivation(U, Id) = Activation;
+      G.V = Activation;
     } else if (Kind == UK_Pattern) {
       auto Threshold = plastix::GetField<ActThreshold>(U, Id);
-      int Act = A.NumConns > 0
-                    ? static_cast<int>((A.Activation / A.NumConns) > Threshold)
-                    : 0;
-      G.WasActive |= (Act != 0);
+      uint32_t Nc = plastix::GetField<InDegreeTag>(U, Id);
+      int Act = Nc > 0 ? static_cast<int>((Activation / Nc) > Threshold) : 0;
+      G.WasActive |= (Act != 0); // benign: all writers store true
       plastix::GetActivation(U, Id) = static_cast<float>(Act);
     } else {
       uint32_t &P = plastix::GetField<Pulse>(U, Id);
       uint32_t D = plastix::GetField<Delay>(U, Id);
       plastix::GetActivation(U, Id) = static_cast<float>(P & 0x1u);
       P = (P >> 1);
-      if (A.Activation != 0) {
+      if (Activation != 0) {
         G.WasActive = true;
         P |= 0x1u << D;
       }
@@ -171,14 +187,15 @@ inline TenureStatus DetermineTenureState(float Weight) {
 }
 
 struct ImprintingLearnerUnitUpdate {
-  static void Update(auto &UA, size_t Id, auto &) {
+  PLASTIX_HD static void Update(auto &UA, size_t Id, auto &) {
     if (plastix::GetField<UKindTag>(UA, Id) == UK_Pattern)
       plastix::GetField<UFlagsTags>(UA, Id).InputsAdded = true;
   }
 };
 
 struct ImprintingLearnerConnUpdate {
-  static void UpdateIncomingConnection(auto &U, size_t DstId, size_t SrcId,
+  PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
+                                       size_t SrcId,
                                        auto &C, size_t ConnId,
                                        ImprintingLearnerGlobals &G) {
     using namespace plastix;
@@ -223,11 +240,12 @@ struct ImprintingLearnerConnUpdate {
     P *= TraceDecay;
     ZBar *= TraceDecay;
 
-    G.Tau += ExpBeta * F * F;
-    G.B += Z * F;
+    AtomicAddGlobal(G.Tau, ExpBeta * F * F);
+    AtomicAddGlobal(G.B, Z * F);
   }
 
-  static void UpdateOutgoingConnection(auto &U, size_t SrcId, size_t DstId,
+  PLASTIX_HD static void UpdateOutgoingConnection(auto &U, size_t SrcId,
+                                       size_t DstId,
                                        auto &C, size_t ConnId,
                                        ImprintingLearnerGlobals &G) {
     using namespace plastix;
@@ -245,7 +263,7 @@ struct ImprintingLearnerConnUpdate {
     float &ZBar = GetField<ZBarTag>(C, ConnId);
     float &P = GetField<PTag>(C, ConnId);
 
-    G.VDelta += Dw * F;
+    AtomicAddGlobal(G.VDelta, Dw * F);
 
     float Multiplier = 1.0f;
     if (G.Tau > 0.0f && hp::Eta / G.Tau < 1.0f)
@@ -369,8 +387,11 @@ struct ImprintingLearnerTraits
   using ResetGlobal = ImprintingLearnerResetGlobal;
   using AddUnit = ImprintingLearnerAddUnit;
   using AddConn = ImprintingLearnerAddConn;
-  static constexpr bool KernelizeUpdate = false;
-  static constexpr bool KernelizeAdd = false;
+  static constexpr bool KernelizeUpdate = true;  // forward+update on-device
+  static constexpr bool KernelizeAdd = false;    // structural host (early-out)
+  // Per-unit reduction forward over the reverse-adjacency CSR — avoids the
+  // per-edge atomicAdd contention when the output unit has ~N incoming edges.
+  static constexpr bool ReverseAdjForward = false;
 
   using ExtraConnFields = plastix::ConnFieldList<
       plastix::alloc::SOAField<plastix::WeightTag, float>,
@@ -390,13 +411,22 @@ struct ImprintingLearnerTraits
                              plastix::alloc::SOAField<Pulse, uint32_t>,
                              plastix::alloc::SOAField<Delay, uint16_t>,
                              plastix::alloc::SOAField<ActThreshold, float>,
-                             plastix::alloc::SOAField<Tenure, TenureStatus>>;
+                             plastix::alloc::SOAField<Tenure, TenureStatus>,
+                             plastix::alloc::SOAField<InDegreeTag, uint32_t>>;
 
   static constexpr plastix::Propagation Model = plastix::Propagation::Pipeline;
   // 2500 input observations + headroom for generated patterns/memories
-  // (gated by Tau < Eta so growth is throttled in practice).
-  static constexpr size_t UnitCapacity = 16384;
-  static constexpr size_t ConnCapacity = 524288;
+  // (gated by Tau < Eta so growth is throttled in practice). Override at
+  // compile time for large-scale experiments, e.g. the ~1M-neuron sweep:
+  //   -DIL_UNIT_CAPACITY=1100000 -DIL_CONN_CAPACITY=1200000
+#ifndef IL_UNIT_CAPACITY
+#define IL_UNIT_CAPACITY 16384
+#endif
+#ifndef IL_CONN_CAPACITY
+#define IL_CONN_CAPACITY 524288
+#endif
+  static constexpr size_t UnitCapacity = IL_UNIT_CAPACITY;
+  static constexpr size_t ConnCapacity = IL_CONN_CAPACITY;
 };
 
 static_assert(plastix::NetworkTraits<ImprintingLearnerTraits>);
@@ -479,9 +509,25 @@ int main(int Argc, char **Argv) {
     plastix::GetField<Tenure>(U, Id) = TS_Tenured;
   };
 
-  ImprintingLearner Net(audio_pred::ObservationDim, InputInit,
+  ImprintingLearner Net(DS.ObservationDim(), InputInit,
                         FC{1, ImprintingLearnerConnInit{},
                            ImprintingLearnerOutputUnitInit{}});
+
+  // Precompute per-unit in-degree (the connection count the forward Apply needs
+  // for the pattern threshold) via the reverse-adjacency, and stash it in the
+  // InDegree unit field so the on-device forward can read it. Static here (no
+  // steady-state growth on this workload); rebuild after structural changes if
+  // growth is enabled.
+  {
+    auto &UA = Net.GetUnitAlloc();
+    auto &CA = Net.GetConnAlloc();
+    size_t NU = UA.Size();
+    std::vector<uint32_t> Offsets(NU + 1), Incoming(CA.Size()), WritePos(NU);
+    plastix::BuildReverseAdjacency(CA, NU, Offsets.data(), Incoming.data(),
+                                   WritePos.data());
+    for (size_t I = 0; I < NU; ++I)
+      plastix::GetField<InDegreeTag>(UA, I) = Offsets[I + 1] - Offsets[I];
+  }
 
   auto [HistPath, SummaryPath, LogPath] =
       bench::OutputPaths(Args, "audio_imprinting");
@@ -490,10 +536,10 @@ int main(int Argc, char **Argv) {
 
   // Seed v_old by running a forward pass over the first observation so the
   // first δ isn't contaminated by VOld=0.
-  std::vector<float> Features(audio_pred::ObservationDim, 0.0f);
+  std::vector<float> Features(DS.ObservationDim(), 0.0f);
   {
     audio_pred::StepView S0 = DS[0];
-    for (size_t I = 0; I < audio_pred::ObservationDim; ++I)
+    for (size_t I = 0; I < DS.ObservationDim(); ++I)
       Features[I] = S0.Test(I) ? 1.0f : 0.0f;
     Net.DoForwardPass(Features);
     Net.DoResetGlobalState();
@@ -512,10 +558,18 @@ int main(int Argc, char **Argv) {
   // Prune+Add (units + conns), `reset` is DoResetGlobalState.
   bench::PhaseTimer Timer;
 
+  // Fine-grained structural breakdown (each plastix Do* syncs the device, so
+  // wall time around each call is a valid per-op measurement). Diagnostic for
+  // the 09 "why is structural so dominant" analysis.
+  double PruneUnitsNs = 0, PruneConnsNs = 0, AddUnitsNs = 0, AddConnsNs = 0;
+  auto DurNs = [](auto A, auto B) {
+    return std::chrono::duration<double, std::nano>(B - A).count();
+  };
+
   auto T0 = std::chrono::steady_clock::now();
   for (size_t T = 0; T < N; ++T) {
     audio_pred::StepView Step = DS[T];
-    for (size_t I = 0; I < audio_pred::ObservationDim; ++I)
+    for (size_t I = 0; I < DS.ObservationDim(); ++I)
       Features[I] = Step.Test(I) ? 1.0f : 0.0f;
     RewardBuf[0] = static_cast<float>(Step.Reward());
 
@@ -529,10 +583,19 @@ int main(int Argc, char **Argv) {
     Net.DoUpdateUnitState();
     Net.DoUpdateConnectionState();
     Timer.MarkUpdate();
+    auto Sa = std::chrono::steady_clock::now();
     Net.DoPruneUnits();
+    auto Sb = std::chrono::steady_clock::now();
     Net.DoPruneConnections();
+    auto Sc = std::chrono::steady_clock::now();
     Net.DoAddUnits();
+    auto Sd = std::chrono::steady_clock::now();
     Net.DoAddConnections();
+    auto Se = std::chrono::steady_clock::now();
+    PruneUnitsNs += DurNs(Sa, Sb);
+    PruneConnsNs += DurNs(Sb, Sc);
+    AddUnitsNs += DurNs(Sc, Sd);
+    AddConnsNs += DurNs(Sd, Se);
     Timer.MarkStructural();
     Net.DoResetGlobalState();
     Timer.MarkReset();
@@ -608,6 +671,14 @@ int main(int Argc, char **Argv) {
             << "  edges=" << bench::LiveEdgeCount(Net.GetConnAlloc()) << "\n";
   std::cout << "[phase] step_count=" << Timer.StepCount()
             << " (see summary csv for per-phase mean/std)\n";
+  {
+    double S = static_cast<double>(N > 0 ? N : 1);
+    std::cout << "[phase-detail] structural ns/step  "
+              << "prune_units=" << (PruneUnitsNs / S)
+              << "  prune_conns=" << (PruneConnsNs / S)
+              << "  add_units=" << (AddUnitsNs / S)
+              << "  add_conns=" << (AddConnsNs / S) << "\n";
+  }
   std::cout << "[done] wrote " << HistPath << ", " << SummaryPath << "\n";
 
   (void)LogPath;
