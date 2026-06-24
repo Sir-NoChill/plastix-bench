@@ -63,6 +63,37 @@ endfunction()
 
 
 # ----------------------------------------------------------------------------
+# Helper: compile a plastix/ bench target through nvcc.
+#
+# Mirrors Plastix's own plastix_enable_cuda_on_target. When the suite is built
+# with PLASTIX_BENCH_ENABLE_CUDA=ON the plastix/ TUs pull in CUB device code +
+# <<<>>> through the Plastix headers (guarded there by PLASTIX_HAS_CUDA), so
+# their .cpp sources must be handed to nvcc. A no-op when CUDA is off, so the
+# host build never touches the CUDA toolchain.
+# ----------------------------------------------------------------------------
+function(plastix_bench_enable_cuda_on_target target)
+    if(NOT PLASTIX_BENCH_ENABLE_CUDA)
+        return()
+    endif()
+    get_target_property(_srcs ${target} SOURCES)
+    foreach(_src ${_srcs})
+        get_filename_component(_ext ${_src} EXT)
+        if(_ext STREQUAL ".cpp")
+            set_source_files_properties(${_src} TARGET_DIRECTORY ${target}
+                                        PROPERTIES LANGUAGE CUDA)
+        endif()
+    endforeach()
+    target_compile_options(${target} PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+    set_target_properties(${target} PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+endfunction()
+
+
+# ----------------------------------------------------------------------------
 # Plastix-framework benchmark.
 # ----------------------------------------------------------------------------
 function(plastix_add_plastix_bench BENCH SRC)
@@ -73,11 +104,9 @@ function(plastix_add_plastix_bench BENCH SRC)
         ${PLASTIX_BENCH_ROOT}/${BENCH}/plastix)
     target_link_libraries(${_target} PRIVATE plastix::plastix)
     target_compile_options(${_target} PRIVATE -Wall -Wextra -Wpedantic)
-    # plastix_enable_cuda_on_target is only defined when this suite is built as
-    # a subdirectory of the Plastix tree with CUDA on; ignore it otherwise.
-    if(COMMAND plastix_enable_cuda_on_target)
-        plastix_enable_cuda_on_target(${_target})
-    endif()
+    # Under PLASTIX_BENCH_ENABLE_CUDA, compile this TU with nvcc (no-op for the
+    # host build).
+    plastix_bench_enable_cuda_on_target(${_target})
     plastix_bench_binary_path(${_target} ${BENCH} plastix)
 endfunction()
 
