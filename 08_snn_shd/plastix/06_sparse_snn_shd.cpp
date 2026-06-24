@@ -147,12 +147,10 @@ struct LifForward {
 // --- loss: softmax CE on accumulated readout membrane ----------------------
 
 struct EpropLoss {
-  static EpropGlobals *G;
-
   template <typename UA>
   static void CalculateLoss(UA &U, plastix::UnitRange Out,
-                            std::span<const float> Target, auto & /*Gref*/) {
-    if (G == nullptr || !G->IsFinalStep || Target.empty())
+                            std::span<const float> Target, auto &G) {
+    if (!G.IsFinalStep || Target.empty())
       return;
 
     // LogitAcc is already the per-timestep mean of mem_o (Forward Apply
@@ -178,16 +176,14 @@ struct EpropLoss {
       if (Y > 0.0f)
         Loss += -std::log(std::max(P, 1e-30f));
     }
-    G->Loss = Loss;
+    G.Loss = Loss;
   }
 };
-EpropGlobals *EpropLoss::G = nullptr;
 
 // --- backward: spatial reverse with random feedback alignment -------------
 
 struct LifBackward {
   using Accumulator = float;
-  static EpropGlobals *G;
 
   PLASTIX_HD static float Map(auto &U, size_t /*Src*/, size_t ToId, auto &C,
                               size_t ConnId, auto &) {
@@ -201,7 +197,7 @@ struct LifBackward {
 
   PLASTIX_HD static float Combine(float A, float B) { return A + B; }
 
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto & /*Gref*/, float Up) {
+  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &G, float Up) {
     bool IsOut = plastix::GetField<IsOutputTag>(U, Id);
     if (IsOut) {
       // Output learning signal = staged dL/dlogit. No surrogate
@@ -210,27 +206,23 @@ struct LifBackward {
           plastix::GetBackwardAcc(U, Id);
     } else {
       float Z = plastix::GetField<PreActTag>(U, Id);
-      float Slope = G ? G->SurrogateSlope : 25.0f;
+      float Slope = G.SurrogateSlope;
       float Den = 1.0f + Slope * std::fabs(Z);
       float Psi = 1.0f / (Den * Den);
       plastix::GetField<LearningSignalTag>(U, Id) = Up * Psi;
     }
   }
 };
-EpropGlobals *LifBackward::G = nullptr;
 
 // --- update connections: maintain eligibility trace + apply weight delta --
 
 struct EpropUpdateConn {
-  static EpropGlobals *G;
-
   PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
                                                   size_t SrcId, auto &C,
-                                                  size_t ConnId,
-                                                  auto & /*Gref*/) {
-    float Slope = G ? G->SurrogateSlope : 25.0f;
-    float BetaT = G ? G->BetaTrace : 0.9f;
-    float Lr = G ? G->Lr : 0.0f;
+                                                  size_t ConnId, auto &G) {
+    float Slope = G.SurrogateSlope;
+    float BetaT = G.BetaTrace;
+    float Lr = G.Lr;
 
     float PreSpk = plastix::GetActivation(U, SrcId);
     // Output is a linear integrator (no surrogate); hidden uses
@@ -254,7 +246,6 @@ struct EpropUpdateConn {
   PLASTIX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
                                                   auto &, size_t, auto &) {}
 };
-EpropGlobals *EpropUpdateConn::G = nullptr;
 
 // --- traits -----------------------------------------------------------------
 
@@ -652,16 +643,14 @@ int main(int Argc, char **Argv) {
             << "  (vs " << (NIn * H.NHid + H.NHid * H.NumClasses)
             << " dense)\n";
 
-  // Wire globals into the policies. They're stateless statics; setting
-  // each once at startup is sufficient.
-  EpropGlobals G;
+  // Bind G to the network's managed GlobalState. Host writes here are visible
+  // to the policies (host- or device-run) through their Globals handle — the
+  // sanctioned channel now that policies no longer carry host-static pointers.
+  EpropGlobals &G = N->Global();
   G.Lr = H.Lr;
   G.BetaTrace = H.BetaTrace;
   G.SurrogateSlope = H.SurrogateSlope;
   G.LogitScale = 1.0f / static_cast<float>(H.NBins);
-  EpropLoss::G = &G;
-  LifBackward::G = &G;
-  EpropUpdateConn::G = &G;
 
   auto [HistPath, SummaryPath, LogPath] =
       bench::OutputPaths(Args, "sparse_snn_shd");

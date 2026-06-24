@@ -99,19 +99,32 @@ struct Backward {
   }
 };
 
+// Runtime-tunable / host-staged parameters read (and, for the add budgets,
+// mutated) by the policies. Held in the network's GlobalState — set from the
+// host via Net::Global() — because device code cannot read host-side statics.
+struct BurstyGlobals {
+  float Lr = 5e-3f;
+  bool PruneArmed = false;
+  float PruneThreshold = 0.0f;
+  int AddBudgetL1 = 0;
+  int AddBudgetL2 = 0;
+  uint16_t AddHiddenL1 = 1;
+  uint16_t AddHiddenL2 = 2;
+  uint64_t AddConnSeed = 0;
+  bool AddConnEnabled = false;
+};
+
 struct UpdateConn {
-  static float Lr;
   PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
                                                   size_t SrcId, auto &C,
-                                                  size_t ConnId, auto &) {
+                                                  size_t ConnId, auto &G) {
     float Grad = plastix::GetField<GradPreActTag>(U, DstId);
     float A = plastix::GetActivation(U, SrcId);
-    plastix::GetWeight(C, ConnId) -= Lr * Grad * A;
+    plastix::GetWeight(C, ConnId) -= G.Lr * Grad * A;
   }
   PLASTIX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
                                                   auto &, size_t, auto &) {}
 };
-float UpdateConn::Lr = 5e-3f;
 
 // UpdateUnit runs before AddUnit in DoStep ordering, so clearing IsNew here
 // only affects units that were added in *previous* steps — units inserted
@@ -124,17 +137,13 @@ struct UpdateUnit {
 };
 
 struct PruneConn {
-  static bool Armed;
-  static float Threshold;
   PLASTIX_HD static bool ShouldPrune(auto &, size_t, size_t, auto &C,
-                                     size_t ConnId, auto &) {
-    if (!Armed)
+                                     size_t ConnId, auto &G) {
+    if (!G.PruneArmed)
       return false;
-    return std::abs(plastix::GetWeight(C, ConnId)) <= Threshold;
+    return std::abs(plastix::GetWeight(C, ConnId)) <= G.PruneThreshold;
   }
 };
-bool PruneConn::Armed = false;
-float PruneConn::Threshold = 0.0f;
 
 // BurstAddUnit — fires `BudgetL1` times for parents at hidden level 1 and
 // `BudgetL2` times for parents at hidden level 2, matching the PyTorch
@@ -144,19 +153,15 @@ float PruneConn::Threshold = 0.0f;
 // function so the compiler doesn't read `AddUnit::AddUnit` as a
 // constructor.
 struct BurstAddUnit {
-  static int BudgetL1;
-  static int BudgetL2;
-  static uint16_t HiddenL1;
-  static uint16_t HiddenL2;
   PLASTIX_HD static std::optional<int16_t> AddUnit(auto &UA, size_t ParentId,
-                                                    auto &) {
+                                                    auto &G) {
     uint16_t Lvl = plastix::GetLevel(UA, ParentId);
-    if (Lvl == HiddenL1 && BudgetL1 > 0) {
-      --BudgetL1;
+    if (Lvl == G.AddHiddenL1 && G.AddBudgetL1 > 0) {
+      --G.AddBudgetL1;
       return int16_t{0};
     }
-    if (Lvl == HiddenL2 && BudgetL2 > 0) {
-      --BudgetL2;
+    if (Lvl == G.AddHiddenL2 && G.AddBudgetL2 > 0) {
+      --G.AddBudgetL2;
       return int16_t{0};
     }
     return std::nullopt;
@@ -170,10 +175,6 @@ struct BurstAddUnit {
     plastix::GetField<IsNewTag>(UA, NewId) = true;
   }
 };
-int BurstAddUnit::BudgetL1 = 0;
-int BurstAddUnit::BudgetL2 = 0;
-uint16_t BurstAddUnit::HiddenL1 = 1;
-uint16_t BurstAddUnit::HiddenL2 = 2;
 
 // BurstAddConn — wires every freshly-allocated unit fully into its
 // adjacent levels (matches PyTorch's `grow()` which widens layers densely).
@@ -181,12 +182,10 @@ uint16_t BurstAddUnit::HiddenL2 = 2;
 // endpoint carries IsNewTag. New units therefore gain edges to/from every
 // neighbour on both sides in a single burst step.
 struct BurstAddConn {
-  static uint64_t Seed;
-  static bool Enabled;
   PLASTIX_HD static bool ShouldAddIncomingConnection(auto &UA, size_t SelfId,
                                                      size_t CandidateId,
-                                                     auto &) {
-    if (!Enabled)
+                                                     auto &G) {
+    if (!G.AddConnEnabled)
       return false;
     uint16_t SelfLvl = plastix::GetLevel(UA, SelfId);
     uint16_t CandLvl = plastix::GetLevel(UA, CandidateId);
@@ -201,18 +200,17 @@ struct BurstAddConn {
     return false;
   }
   PLASTIX_HD static void InitConnection(auto &, size_t /*From*/, size_t /*To*/,
-                                        auto &CA, size_t ConnId, auto &) {
+                                        auto &CA, size_t ConnId, auto &G) {
     uint64_t Counter = static_cast<uint64_t>(ConnId);
     // Small Gaussian-ish init via uniform[-0.05, 0.05], mirroring PyTorch's
     // `noise=0.05 * randn` magnitude.
     plastix::GetWeight(CA, ConnId) =
-        plastix::UniformReal(Seed ^ 0xC3C3ull, Counter, -0.05f, 0.05f);
+        plastix::UniformReal(G.AddConnSeed ^ 0xC3C3ull, Counter, -0.05f, 0.05f);
   }
 };
-uint64_t BurstAddConn::Seed = 0;
-bool BurstAddConn::Enabled = false;
 
 struct BurstyTraits : plastix::DefaultNetworkTraits<> {
+  using GlobalState = BurstyGlobals;
   using ForwardPass = Forward;
   using BackwardPass = Backward;
   using Loss = plastix::SoftmaxCrossEntropyLoss;
@@ -430,10 +428,10 @@ template <typename N> static size_t MagnitudePrune(N &Net, float Frac) {
   K = std::min(K, Alive.size());
   std::nth_element(Alive.begin(), Alive.begin() + K - 1, Alive.end());
   size_t Before = bench::LiveEdgeCount(CA);
-  PruneConn::Threshold = Alive[K - 1];
-  PruneConn::Armed = true;
+  Net.Global().PruneThreshold = Alive[K - 1];
+  Net.Global().PruneArmed = true;
   Net.DoPruneConnections();
-  PruneConn::Armed = false;
+  Net.Global().PruneArmed = false;
   size_t After = bench::LiveEdgeCount(CA);
   return Before - After;
 }
@@ -459,8 +457,6 @@ int main(int Argc, char **Argv) {
   H.Lr = Args.GetFloat("lr", H.Lr);
   if (Args.Quick)
     H.MaxSteps = std::max<size_t>(200, H.MaxSteps / 5);
-  UpdateConn::Lr = H.Lr;
-  BurstAddConn::Seed = static_cast<uint64_t>(Args.Seed) * 1000ull + 17ull;
 
   std::vector<std::vector<float>> X;
   std::vector<int> Y;
@@ -486,6 +482,9 @@ int main(int Argc, char **Argv) {
       FCHidden{H.InitHidden, UniformInit{SeedBase + 1, Limit}},
       FCHidden{H.InitHidden, UniformInit{SeedBase + 2, Limit}},
       FCOut{H.NumClasses, UniformInit{SeedBase + 3, Limit}, MarkOutput{}}));
+  // Stage runtime params into the managed GlobalState (read by the policies).
+  N->Global().Lr = H.Lr;
+  N->Global().AddConnSeed = static_cast<uint64_t>(Args.Seed) * 1000ull + 17ull;
 
   // Carve final 15% as held-out test set. The training cursor wraps within
   // [0, NTrain); the plateau slice stays inside the training portion too,
@@ -561,7 +560,7 @@ int main(int Argc, char **Argv) {
         size_t OldH1 = 0;
         auto &UA = N->GetUnitAlloc();
         for (size_t U = 0; U < UA.Size(); ++U)
-          if (plastix::GetLevel(UA, U) == BurstAddUnit::HiddenL1)
+          if (plastix::GetLevel(UA, U) == N->Global().AddHiddenL1)
             ++OldH1;
         int NNew = std::max(
             1, static_cast<int>(H.BurstFrac * static_cast<float>(OldH1)));
@@ -569,13 +568,13 @@ int main(int Argc, char **Argv) {
         // Arm AddUnit (both hidden layers) + AddConn, run a single DoStep
         // with the same training pair to let the framework fire Add* in
         // phase order.
-        BurstAddUnit::BudgetL1 = NNew;
-        BurstAddUnit::BudgetL2 = NNew;
-        BurstAddConn::Enabled = true;
+        N->Global().AddBudgetL1 = NNew;
+        N->Global().AddBudgetL2 = NNew;
+        N->Global().AddConnEnabled = true;
         N->DoStep(X[I], Tgt);
-        BurstAddConn::Enabled = false;
-        BurstAddUnit::BudgetL1 = 0;
-        BurstAddUnit::BudgetL2 = 0;
+        N->Global().AddConnEnabled = false;
+        N->Global().AddBudgetL1 = 0;
+        N->Global().AddBudgetL2 = 0;
 
         size_t Killed = MagnitudePrune(*N, H.PostBurstPruneFrac);
         ++Bursts;
@@ -611,7 +610,7 @@ int main(int Argc, char **Argv) {
   size_t HiddenFinal = 0;
   for (size_t U = 0; U < N->GetUnitAlloc().Size(); ++U) {
     uint16_t Lvl = plastix::GetLevel(N->GetUnitAlloc(), U);
-    if (Lvl == BurstAddUnit::HiddenL1 || Lvl == BurstAddUnit::HiddenL2)
+    if (Lvl == N->Global().AddHiddenL1 || Lvl == N->Global().AddHiddenL2)
       ++HiddenFinal;
   }
   S.Set("hidden_final", static_cast<int>(HiddenFinal));

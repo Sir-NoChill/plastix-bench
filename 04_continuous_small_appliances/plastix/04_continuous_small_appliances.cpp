@@ -111,33 +111,48 @@ struct Backward {
   }
 };
 
+// Runtime-tunable parameters plus the cross-phase argmax/argmin scratch that
+// the policies write and read within a DoStep. Held in the network's
+// GlobalState (managed memory) — staged/reset from the host via Net::Global()
+// — because device code cannot read host-side static members. The structural
+// phases run on the host here (Kernelize*=false), so the sequential argmax/
+// argmin reductions over G are well-defined.
+struct SplitGlobals {
+  // UpdateUnit
+  float Alpha = 0.1f;
+  uint16_t HiddenLevel = 1;
+  int ArgmaxId = -1;
+  float ArgmaxVar = -1.0f;
+  // UpdateConn
+  float Lr = 5e-3f;
+  int ArgminConnId = -1;
+  float ArgminAbs = std::numeric_limits<float>::infinity();
+  // PruneConn / SplitAddUnit arming
+  bool PruneArmed = false;
+  bool AddArmed = false;
+  // SplitAddConn
+  uint64_t AddConnSeed = 0;
+};
+
 // UpdateUnit — EMA of activation^2 per unit, and global argmax tracker.
-// The static ArgmaxId / ArgmaxVar are reset by the host before DoStep, then
-// AddUnit reads ArgmaxId at the AddUnit phase to pick the parent.
+// G.ArgmaxId / G.ArgmaxVar are reset by the host before DoStep, then AddUnit
+// reads G.ArgmaxId at the AddUnit phase to pick the parent.
 struct UpdateUnit {
-  static float Alpha;
-  static uint16_t HiddenLevel;
-  static int ArgmaxId;
-  static float ArgmaxVar;
-  PLASTIX_HD static void Update(auto &UA, size_t Id, auto &) {
+  PLASTIX_HD static void Update(auto &UA, size_t Id, auto &G) {
     // Clear the per-unit live-in-degree so UpdateConn can re-accumulate it
     // below. UpdateUnit fires before UpdateConn in DoStep ordering.
     plastix::GetField<LiveInDegreeTag>(UA, Id) = 0;
-    if (plastix::GetLevel(UA, Id) != HiddenLevel)
+    if (plastix::GetLevel(UA, Id) != G.HiddenLevel)
       return;
     float A = plastix::GetActivation(UA, Id);
     float &V = plastix::GetField<ActVarTag>(UA, Id);
-    V = (1.0f - Alpha) * V + Alpha * A * A;
-    if (V > ArgmaxVar) {
-      ArgmaxVar = V;
-      ArgmaxId = static_cast<int>(Id);
+    V = (1.0f - G.Alpha) * V + G.Alpha * A * A;
+    if (V > G.ArgmaxVar) {
+      G.ArgmaxVar = V;
+      G.ArgmaxId = static_cast<int>(Id);
     }
   }
 };
-float UpdateUnit::Alpha = 0.1f;
-uint16_t UpdateUnit::HiddenLevel = 1;
-int UpdateUnit::ArgmaxId = -1;
-float UpdateUnit::ArgmaxVar = -1.0f;
 
 // UpdateConn — SGD on weights + tracks argmin |w| for the per-step prune.
 // Two-phase split inside UpdateConn:
@@ -150,63 +165,53 @@ float UpdateUnit::ArgmaxVar = -1.0f;
 //     their destination. PruneConn fires later in the same DoStep and
 //     reads the resulting argmin id.
 struct UpdateConn {
-  static float Lr;
-  static int ArgminConnId;
-  static float ArgminAbs;
   PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
                                                   size_t SrcId, auto &C,
-                                                  size_t ConnId, auto &) {
+                                                  size_t ConnId, auto &G) {
     ++plastix::GetField<LiveInDegreeTag>(U, DstId);
     float Grad = plastix::GetField<GradPreActTag>(U, DstId);
     float A = plastix::GetActivation(U, SrcId);
-    plastix::GetWeight(C, ConnId) -= Lr * Grad * A;
+    plastix::GetWeight(C, ConnId) -= G.Lr * Grad * A;
   }
   PLASTIX_HD static void UpdateOutgoingConnection(auto &U, size_t /*SrcId*/,
                                                   size_t DstId, auto &C,
-                                                  size_t ConnId, auto &) {
+                                                  size_t ConnId, auto &G) {
     // Don't even propose a connection for pruning if it's the only live
     // incoming edge of its destination — that's the orphan guard.
     if (plastix::GetField<LiveInDegreeTag>(U, DstId) <= 1)
       return;
     float Abs = std::abs(plastix::GetWeight(C, ConnId));
-    if (Abs < ArgminAbs) {
-      ArgminAbs = Abs;
-      ArgminConnId = static_cast<int>(ConnId);
+    if (Abs < G.ArgminAbs) {
+      G.ArgminAbs = Abs;
+      G.ArgminConnId = static_cast<int>(ConnId);
     }
   }
 };
-float UpdateConn::Lr = 5e-3f;
-int UpdateConn::ArgminConnId = -1;
-float UpdateConn::ArgminAbs = std::numeric_limits<float>::infinity();
 
 // PruneConn — fires only when armed; reads the argmin id written by
 // UpdateConn earlier in this same DoStep. Phase ordering inside DoStep is
 // Forward -> Loss -> Backward -> UpdateUnit -> UpdateConn -> PruneUnit ->
 // PruneConn -> ... so the static is always fresh when ShouldPrune fires.
 struct PruneConn {
-  static bool Armed;
   PLASTIX_HD static bool ShouldPrune(auto &, size_t, size_t, auto &,
-                                     size_t ConnId, auto &) {
-    return Armed &&
-           static_cast<int>(ConnId) == UpdateConn::ArgminConnId;
+                                     size_t ConnId, auto &G) {
+    return G.PruneArmed && static_cast<int>(ConnId) == G.ArgminConnId;
   }
 };
-bool PruneConn::Armed = false;
 
 // SplitAddUnit — spawns one new hidden unit. Filter: ParentId must equal
 // the argmax-variance unit picked by UpdateUnit. The static Armed flag is
 // reset right after AddUnits fires so only one spawn happens per step.
 struct SplitAddUnit {
-  static bool Armed;
   PLASTIX_HD static std::optional<int16_t> AddUnit(auto &UA, size_t ParentId,
-                                                    auto &) {
-    if (!Armed)
+                                                    auto &G) {
+    if (!G.AddArmed)
       return std::nullopt;
-    if (plastix::GetLevel(UA, ParentId) != UpdateUnit::HiddenLevel)
+    if (plastix::GetLevel(UA, ParentId) != G.HiddenLevel)
       return std::nullopt;
-    if (static_cast<int>(ParentId) != UpdateUnit::ArgmaxId)
+    if (static_cast<int>(ParentId) != G.ArgmaxId)
       return std::nullopt;
-    Armed = false; // single-shot
+    G.AddArmed = false; // single-shot
     return int16_t{0};
   }
   PLASTIX_HD static void InitUnit(auto &UA, size_t NewId, size_t /*Parent*/,
@@ -219,7 +224,6 @@ struct SplitAddUnit {
     plastix::GetField<IsNewTag>(UA, NewId) = true;
   }
 };
-bool SplitAddUnit::Armed = false;
 
 // SplitAddConn — wires the freshly-allocated unit to every input (level 0)
 // and to every output (level >= HiddenLevel+1). The framework's
@@ -227,7 +231,6 @@ bool SplitAddUnit::Armed = false;
 // reaches input -> hidden and hidden -> output. Uses the same per-step
 // IsNewTag pattern as workload 03.
 struct SplitAddConn {
-  static uint64_t Seed;
   PLASTIX_HD static bool ShouldAddIncomingConnection(auto &UA, size_t SelfId,
                                                      size_t CandidateId,
                                                      auto &) {
@@ -248,15 +251,15 @@ struct SplitAddConn {
     return false;
   }
   PLASTIX_HD static void InitConnection(auto &, size_t /*From*/, size_t /*To*/,
-                                        auto &CA, size_t ConnId, auto &) {
+                                        auto &CA, size_t ConnId, auto &G) {
     uint64_t Counter = static_cast<uint64_t>(ConnId);
     plastix::GetWeight(CA, ConnId) =
-        plastix::UniformReal(Seed, Counter, -0.05f, 0.05f);
+        plastix::UniformReal(G.AddConnSeed, Counter, -0.05f, 0.05f);
   }
 };
-uint64_t SplitAddConn::Seed = 0;
 
 struct SplitTraits : plastix::DefaultNetworkTraits<> {
+  using GlobalState = SplitGlobals;
   using ForwardPass = Forward;
   using BackwardPass = Backward;
   using Loss = plastix::MSELoss;
@@ -506,10 +509,6 @@ int main(int Argc, char **Argv) {
   if (Args.Quick)
     H.MaxSteps = std::max<size_t>(600, H.MaxSteps / 5);
 
-  UpdateConn::Lr = H.Lr;
-  UpdateUnit::Alpha = H.VarEmaAlpha;
-  SplitAddConn::Seed = static_cast<uint64_t>(Args.Seed) * 1000ull + 19ull;
-
   std::vector<std::vector<float>> X;
   std::vector<float> Y;
   std::string DatasetName = "synthetic-slow-drift";
@@ -533,6 +532,10 @@ int main(int Argc, char **Argv) {
   auto N = std::unique_ptr<Net>(new Net(
       H.InDim, FCHidden{H.InitHidden, UniformInit{SeedBase + 1, Limit}},
       FCOut{1, UniformInit{SeedBase + 2, Limit}, MarkOutput{}}));
+  // Stage runtime params into the managed GlobalState (read by the policies).
+  N->Global().Lr = H.Lr;
+  N->Global().Alpha = H.VarEmaAlpha;
+  N->Global().AddConnSeed = static_cast<uint64_t>(Args.Seed) * 1000ull + 19ull;
 
   std::mt19937 Rng(static_cast<uint32_t>(Args.Seed));
   std::uniform_real_distribution<float> Coin(0.0f, 1.0f);
@@ -572,10 +575,10 @@ int main(int Argc, char **Argv) {
     // Host-side per-step setup. Clear the per-step argmax/argmin reductions
     // and the structural-mutation arms; the policy methods will rewrite
     // them during the step.
-    UpdateUnit::ArgmaxId = -1;
-    UpdateUnit::ArgmaxVar = -1.0f;
-    UpdateConn::ArgminConnId = -1;
-    UpdateConn::ArgminAbs = std::numeric_limits<float>::infinity();
+    N->Global().ArgmaxId = -1;
+    N->Global().ArgmaxVar = -1.0f;
+    N->Global().ArgminConnId = -1;
+    N->Global().ArgminAbs = std::numeric_limits<float>::infinity();
 
     ClearIsNew(*N);
 
@@ -584,7 +587,7 @@ int main(int Argc, char **Argv) {
     size_t HiddenWidth = 0;
     auto &UA = N->GetUnitAlloc();
     for (size_t U = 0; U < UA.Size(); ++U)
-      if (plastix::GetLevel(UA, U) == UpdateUnit::HiddenLevel)
+      if (plastix::GetLevel(UA, U) == N->Global().HiddenLevel)
         ++HiddenWidth;
 
     bool WantSplit =
@@ -596,8 +599,8 @@ int main(int Argc, char **Argv) {
     // a network-wide one: at least 1.5x hidden_width edges have to stay
     // alive across the run.
     bool WantPrune = Coin(Rng) < H.PPrune;
-    SplitAddUnit::Armed = WantSplit;
-    PruneConn::Armed = WantPrune;
+    N->Global().AddArmed = WantSplit;
+    N->Global().PruneArmed = WantPrune;
 
     size_t I = CursorI;
     CursorI = (CursorI + 1) % NTrain;
@@ -652,8 +655,8 @@ int main(int Argc, char **Argv) {
     // noisy copy of the parent's incoming + the halved outgoing. We do
     // the same fixup here in host code now that the new unit and its
     // edges exist in the SOA arenas.
-    if (DU > 0 && UpdateUnit::ArgmaxId >= 0) {
-      size_t Parent = static_cast<size_t>(UpdateUnit::ArgmaxId);
+    if (DU > 0 && N->Global().ArgmaxId >= 0) {
+      size_t Parent = static_cast<size_t>(N->Global().ArgmaxId);
       // The new unit is at the previously-allocated count.
       size_t NewId = UnitsBefore;
       RepairSplitWeights(*N, Parent, NewId, Rng, /*Noise=*/0.05f);
@@ -701,7 +704,7 @@ int main(int Argc, char **Argv) {
   S.Set("prunes_fired", static_cast<int>(Prunes));
   size_t HiddenFinal = 0;
   for (size_t U = 0; U < N->GetUnitAlloc().Size(); ++U)
-    if (plastix::GetLevel(N->GetUnitAlloc(), U) == UpdateUnit::HiddenLevel)
+    if (plastix::GetLevel(N->GetUnitAlloc(), U) == N->Global().HiddenLevel)
       ++HiddenFinal;
   S.Set("hidden_final", static_cast<int>(HiddenFinal));
   S.Set("edges_final",

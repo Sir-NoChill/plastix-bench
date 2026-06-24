@@ -105,72 +105,77 @@ struct Backward {
   }
 };
 
+// Runtime-tunable / host-staged parameters and per-burst budgets read (and
+// decremented) by the policies. Held in the network's GlobalState (managed
+// memory) — set from the host via Net::Global() — because device code cannot
+// read host-side static members. The structural phases run on the host here
+// (Kernelize*=false), so the budget decrements over G are well-defined.
+struct MgGlobals {
+  float Lr = 5e-3f;
+  uint16_t HiddenLevel = 1;
+  int ShrinkBudget = 0;          // PruneUnit
+  int RewireBudget = 0;          // PruneConn
+  uint64_t RewireSeed = 0;       // PruneConn
+  float RewireBias = 0.0f;       // PruneConn sample rate per call
+  int AddBudget = 0;             // MgAddUnit
+  uint64_t AddConnSeed = 0;      // MgAddConn
+  bool RewireAddEnabled = false; // MgAddConn
+  float RewireDensity = 0.0f;    // MgAddConn
+};
+
 struct UpdateConn {
-  static float Lr;
   PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
                                                   size_t SrcId, auto &C,
-                                                  size_t ConnId, auto &) {
+                                                  size_t ConnId, auto &G) {
     float Grad = plastix::GetField<GradPreActTag>(U, DstId);
     float A = plastix::GetActivation(U, SrcId);
-    plastix::GetWeight(C, ConnId) -= Lr * Grad * A;
+    plastix::GetWeight(C, ConnId) -= G.Lr * Grad * A;
   }
   PLASTIX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
                                                   auto &, size_t, auto &) {}
 };
-float UpdateConn::Lr = 5e-3f;
 
 // PruneUnit — fires while ShrinkBudget > 0. Filters to hidden-level units
 // only. Decrements the static budget on each fire.
 struct PruneUnit {
-  static int ShrinkBudget;
-  static uint16_t HiddenLevel;
-  PLASTIX_HD static bool ShouldPrune(auto &UA, size_t Id, auto &) {
-    if (ShrinkBudget <= 0)
+  PLASTIX_HD static bool ShouldPrune(auto &UA, size_t Id, auto &G) {
+    if (G.ShrinkBudget <= 0)
       return false;
-    if (plastix::GetLevel(UA, Id) != HiddenLevel)
+    if (plastix::GetLevel(UA, Id) != G.HiddenLevel)
       return false;
-    --ShrinkBudget;
+    --G.ShrinkBudget;
     return true;
   }
 };
-int PruneUnit::ShrinkBudget = 0;
-uint16_t PruneUnit::HiddenLevel = 1;
 
 // PruneConn — used for rewires. Fires while RewireBudget > 0 with a
 // per-conn coin flip seeded by ConnId so the result is deterministic but
 // scattered across the connection space.
 struct PruneConn {
-  static int RewireBudget;
-  static uint64_t RewireSeed;
-  static float Bias; // sample rate per call
   PLASTIX_HD static bool ShouldPrune(auto &, size_t, size_t, auto &,
-                                     size_t ConnId, auto &) {
-    if (RewireBudget <= 0)
+                                     size_t ConnId, auto &G) {
+    if (G.RewireBudget <= 0)
       return false;
-    if (plastix::Bernoulli(RewireSeed, static_cast<uint64_t>(ConnId), Bias)) {
-      --RewireBudget;
+    if (plastix::Bernoulli(G.RewireSeed, static_cast<uint64_t>(ConnId),
+                           G.RewireBias)) {
+      --G.RewireBudget;
       return true;
     }
     return false;
   }
 };
-int PruneConn::RewireBudget = 0;
-uint64_t PruneConn::RewireSeed = 0;
-float PruneConn::Bias = 0.0f;
 
 // MgAddUnit — same single-shot growth pattern as workload 04, but with a
 // multi-fire budget instead of one-at-a-time. Heavy-tail Pareto magnitudes
 // from the host become a one-step burst of variable size.
 struct MgAddUnit {
-  static int Budget;
-  static uint16_t HiddenLevel;
   PLASTIX_HD static std::optional<int16_t> AddUnit(auto &UA, size_t ParentId,
-                                                    auto &) {
-    if (Budget <= 0)
+                                                    auto &G) {
+    if (G.AddBudget <= 0)
       return std::nullopt;
-    if (plastix::GetLevel(UA, ParentId) != HiddenLevel)
+    if (plastix::GetLevel(UA, ParentId) != G.HiddenLevel)
       return std::nullopt;
-    --Budget;
+    --G.AddBudget;
     return int16_t{0};
   }
   PLASTIX_HD static void InitUnit(auto &UA, size_t NewId, size_t /*Parent*/,
@@ -182,8 +187,6 @@ struct MgAddUnit {
     plastix::GetField<IsNewTag>(UA, NewId) = true;
   }
 };
-int MgAddUnit::Budget = 0;
-uint16_t MgAddUnit::HiddenLevel = 1;
 
 // MgAddConn — two simultaneous duties:
 //   - Wire every freshly-added hidden unit to all inputs and the output
@@ -191,12 +194,9 @@ uint16_t MgAddUnit::HiddenLevel = 1;
 //   - When RewireAddEnabled is true, also propose a small number of new
 //     random input -> hidden edges to compensate for the rewire's prune.
 struct MgAddConn {
-  static uint64_t Seed;
-  static bool RewireAddEnabled;
-  static float RewireDensity;
   PLASTIX_HD static bool ShouldAddIncomingConnection(auto &UA, size_t SelfId,
                                                      size_t CandidateId,
-                                                     auto &) {
+                                                     auto &G) {
     bool SelfNew = plastix::GetField<IsNewTag>(UA, SelfId);
     bool SelfOut = plastix::GetField<IsOutputTag>(UA, SelfId);
     bool CandNew = plastix::GetField<IsNewTag>(UA, CandidateId);
@@ -205,14 +205,14 @@ struct MgAddConn {
       return true;
     if (SelfOut && CandNew)
       return true;
-    if (RewireAddEnabled &&
+    if (G.RewireAddEnabled &&
         plastix::GetLevel(UA, CandidateId) <
             plastix::GetLevel(UA, SelfId) &&
-        plastix::GetLevel(UA, SelfId) == PruneUnit::HiddenLevel) {
+        plastix::GetLevel(UA, SelfId) == G.HiddenLevel) {
       uint64_t Counter = (static_cast<uint64_t>(SelfId) << 32) |
                          static_cast<uint64_t>(CandidateId);
-      return plastix::Bernoulli(Seed ^ 0xDEADBEEFull, Counter,
-                                RewireDensity);
+      return plastix::Bernoulli(G.AddConnSeed ^ 0xDEADBEEFull, Counter,
+                                G.RewireDensity);
     }
     return false;
   }
@@ -221,17 +221,15 @@ struct MgAddConn {
     return false;
   }
   PLASTIX_HD static void InitConnection(auto &, size_t /*From*/, size_t /*To*/,
-                                        auto &CA, size_t ConnId, auto &) {
+                                        auto &CA, size_t ConnId, auto &G) {
     uint64_t Counter = static_cast<uint64_t>(ConnId);
     plastix::GetWeight(CA, ConnId) =
-        plastix::UniformReal(Seed, Counter, -0.05f, 0.05f);
+        plastix::UniformReal(G.AddConnSeed, Counter, -0.05f, 0.05f);
   }
 };
-uint64_t MgAddConn::Seed = 0;
-bool MgAddConn::RewireAddEnabled = false;
-float MgAddConn::RewireDensity = 0.0f;
 
 struct MgTraits : plastix::DefaultNetworkTraits<> {
+  using GlobalState = MgGlobals;
   using ForwardPass = Forward;
   using BackwardPass = Backward;
   using Loss = plastix::MSELoss;
@@ -357,7 +355,7 @@ static size_t CountHidden(Net &N) {
   size_t H = 0;
   auto &UA = N.GetUnitAlloc();
   for (size_t I = 0; I < UA.Size(); ++I)
-    if (plastix::GetLevel(UA, I) == MgAddUnit::HiddenLevel &&
+    if (plastix::GetLevel(UA, I) == N.Global().HiddenLevel &&
         !plastix::GetField<plastix::PrunedTag>(UA, I))
       ++H;
   return H;
@@ -406,10 +404,6 @@ int main(int Argc, char **Argv) {
   H.Lr = Args.GetFloat("lr", H.Lr);
   if (Args.Quick)
     H.MaxSteps = std::max<size_t>(200, H.MaxSteps / 5);
-  UpdateConn::Lr = H.Lr;
-  MgAddConn::Seed = static_cast<uint64_t>(Args.Seed) * 1000ull + 29ull;
-  PruneConn::RewireSeed = MgAddConn::Seed ^ 0xC0FFEEull;
-  MgAddConn::RewireDensity = H.RewireFrac;
 
   auto Series =
       MackeyGlass(H.SeriesLen, H.Tau, static_cast<uint32_t>(Args.Seed));
@@ -428,6 +422,11 @@ int main(int Argc, char **Argv) {
   auto N = std::unique_ptr<Net>(new Net(
       H.InLen, FCHidden{H.InitHidden, UniformInit{SeedBase + 1, Limit}},
       FCOut{1, UniformInit{SeedBase + 2, Limit}, MarkOutput{}}));
+  // Stage runtime params into the managed GlobalState (read by the policies).
+  N->Global().Lr = H.Lr;
+  N->Global().AddConnSeed = static_cast<uint64_t>(Args.Seed) * 1000ull + 29ull;
+  N->Global().RewireSeed = N->Global().AddConnSeed ^ 0xC0FFEEull;
+  N->Global().RewireDensity = H.RewireFrac;
 
   std::mt19937 Rng(static_cast<uint32_t>(Args.Seed));
   std::uniform_real_distribution<float> Coin(0.0f, 1.0f);
@@ -461,14 +460,14 @@ int main(int Argc, char **Argv) {
                         static_cast<int>(H.MaxDeltaPerStep));
     bool GrowDir = Coin(Rng) > 0.5f;
     if (GrowDir && HBefore + Mag <= H.MaxHidden) {
-      MgAddUnit::Budget = Mag;
-      PruneUnit::ShrinkBudget = 0;
+      N->Global().AddBudget = Mag;
+      N->Global().ShrinkBudget = 0;
     } else if (!GrowDir && HBefore > H.MinHidden + Mag) {
-      MgAddUnit::Budget = 0;
-      PruneUnit::ShrinkBudget = Mag;
+      N->Global().AddBudget = 0;
+      N->Global().ShrinkBudget = Mag;
     } else {
-      MgAddUnit::Budget = 0;
-      PruneUnit::ShrinkBudget = 0;
+      N->Global().AddBudget = 0;
+      N->Global().ShrinkBudget = 0;
     }
 
     // Rewires fire every `rewire_every` steps.
@@ -477,14 +476,14 @@ int main(int Argc, char **Argv) {
       size_t Alive = bench::LiveEdgeCount(N->GetConnAlloc());
       int Budget =
           std::max<int>(1, static_cast<int>(H.RewireFrac * Alive));
-      PruneConn::RewireBudget = Budget;
-      PruneConn::Bias = H.RewireFrac;
-      MgAddConn::RewireAddEnabled = true;
+      N->Global().RewireBudget = Budget;
+      N->Global().RewireBias = H.RewireFrac;
+      N->Global().RewireAddEnabled = true;
       ++Rewires;
     } else {
-      PruneConn::RewireBudget = 0;
-      PruneConn::Bias = 0.0f;
-      MgAddConn::RewireAddEnabled = false;
+      N->Global().RewireBudget = 0;
+      N->Global().RewireBias = 0.0f;
+      N->Global().RewireAddEnabled = false;
     }
 
     size_t I = (Step - 1) % NTr;
@@ -511,10 +510,10 @@ int main(int Argc, char **Argv) {
     Timer.MarkReset();
     Timer.StepDone();
 
-    PruneUnit::ShrinkBudget = 0;
-    PruneConn::RewireBudget = 0;
-    MgAddUnit::Budget = 0;
-    MgAddConn::RewireAddEnabled = false;
+    N->Global().ShrinkBudget = 0;
+    N->Global().RewireBudget = 0;
+    N->Global().AddBudget = 0;
+    N->Global().RewireAddEnabled = false;
 
     size_t HAfter = CountHidden(*N);
     int DU = static_cast<int>(HAfter) - static_cast<int>(HBefore);

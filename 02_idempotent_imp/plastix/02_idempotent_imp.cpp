@@ -95,36 +95,40 @@ struct Backward {
   }
 };
 
+// Runtime-tunable / host-armed parameters read by the (possibly device-side)
+// policies. Held in the network's GlobalState — staged from the host via
+// Net::Global() — because device code cannot read host-side static members.
+struct IMPGlobals {
+  float Lr = 1e-3f;
+  bool PruneArmed = false;
+  float PruneThreshold = 0.0f;
+};
+
 struct UpdateConn {
-  static float Lr;
   PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
                                                   size_t SrcId, auto &C,
-                                                  size_t ConnId, auto &) {
+                                                  size_t ConnId, auto &G) {
     float Grad = plastix::GetField<GradPreActTag>(U, DstId);
     float A = plastix::GetActivation(U, SrcId);
-    plastix::GetWeight(C, ConnId) -= Lr * Grad * A;
+    plastix::GetWeight(C, ConnId) -= G.Lr * Grad * A;
   }
   PLASTIX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
                                                   auto &, size_t, auto &) {}
 };
-float UpdateConn::Lr = 1e-3f;
 
 // PruneConn policy: only fires when armed. The host code arms it before
 // calling N.DoPruneConnections() between training rounds, then disarms.
 struct PruneConn {
-  static bool Armed;
-  static float Threshold;
   PLASTIX_HD static bool ShouldPrune(auto &, size_t, size_t, auto &C,
-                                     size_t ConnId, auto &) {
-    if (!Armed)
+                                     size_t ConnId, auto &G) {
+    if (!G.PruneArmed)
       return false;
-    return std::abs(plastix::GetWeight(C, ConnId)) <= Threshold;
+    return std::abs(plastix::GetWeight(C, ConnId)) <= G.PruneThreshold;
   }
 };
-bool PruneConn::Armed = false;
-float PruneConn::Threshold = 0.0f;
 
 struct IMPTraits : plastix::DefaultNetworkTraits<> {
+  using GlobalState = IMPGlobals;
   using ForwardPass = Forward;
   using BackwardPass = Backward;
   using Loss = plastix::SoftmaxCrossEntropyLoss;
@@ -344,7 +348,6 @@ int main(int Argc, char **Argv) {
     H.FinetuneEpochs = std::max<size_t>(1, H.FinetuneEpochs / 2);
     H.MaxRounds = std::max<size_t>(2, H.MaxRounds / 3);
   }
-  UpdateConn::Lr = H.Lr;
 
   auto Train = SynthUcr(H.NPerClass, H.NumClasses, H.InLen, H.Snr,
                         static_cast<uint32_t>(Args.Seed));
@@ -361,6 +364,7 @@ int main(int Argc, char **Argv) {
   float Limit = std::sqrt(6.0f / static_cast<float>(H.InLen + H.Hidden));
   uint64_t SeedBase = static_cast<uint64_t>(Args.Seed) * 1000ull + 11ull;
   auto N = Build(H, SeedBase, Limit);
+  N->Global().Lr = H.Lr;
 
   auto [HistPath, SummaryPath, LogPath] =
       bench::OutputPaths(Args, "idempotent_imp");
@@ -400,17 +404,17 @@ int main(int Argc, char **Argv) {
     // the "step-by-step declarative API" in action: the framework exposes
     // each Do<Phase> as a public method on Network so the host can stage
     // them outside the canonical DoStep ordering.
-    PruneConn::Threshold = Thresh;
-    PruneConn::Armed = true;
+    N->Global().PruneThreshold = Thresh;
+    N->Global().PruneArmed = true;
     N->DoPruneConnections();
-    PruneConn::Armed = false;
+    N->Global().PruneArmed = false;
 
     size_t AliveAfter = bench::LiveEdgeCount(N->GetConnAlloc());
     size_t Killed = AliveBefore - AliveAfter;
 
     // Step 3 — finetune with a smaller LR so the survivors don't drift far
     // from the lottery-ticket basin.
-    UpdateConn::Lr = H.Lr * H.FinetuneLrScale;
+    N->Global().Lr = H.Lr * H.FinetuneLrScale;
     TrainEpochs(*N, Train, H.FinetuneEpochs, Rng, Timer);
 
     double Acc = EvalAcc(*N, Test);
