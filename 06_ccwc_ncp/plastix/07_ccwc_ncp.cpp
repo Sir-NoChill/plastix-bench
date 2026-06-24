@@ -86,22 +86,21 @@ struct LtcAcc {
 // pattern is used by 02_idempotent_imp.cpp (`UpdateConn::Lr`).
 // ---------------------------------------------------------------------------
 
+// Network GlobalState: held in managed memory and staged from the host via
+// Net::Global(), so the (possibly device-side) policies read it through their
+// Globals handle rather than from host-side statics, which device code cannot
+// read.
 struct Hyper {
-  static float Dt;
-  static float Lr;
-  static float BetaTrace;
+  float Dt = 0.1f;
+  float Lr = 1e-3f;
+  float BetaTrace = 0.9f;
   // Per-step weight-delta clip. e-prop's |L · e| can spike when the
   // recurrent command layer drives a sigmoid into saturation; clipping
   // bounds the explosion without changing the steady-state behaviour.
-  static float ClipDelta;
+  float ClipDelta = 0.1f;
   // Hard cap on |w|. Same purpose, complementary axis.
-  static float WMax;
+  float WMax = 5.0f;
 };
-float Hyper::Dt        = 0.1f;
-float Hyper::Lr        = 1e-3f;
-float Hyper::BetaTrace = 0.9f;
-float Hyper::ClipDelta = 0.1f;
-float Hyper::WMax      = 5.0f;
 
 // ---------------------------------------------------------------------------
 // Policies
@@ -131,10 +130,10 @@ struct LtcForward {
   // [−1, 1] (sin/cos), so a tanh-saturated readout is in the right
   // range. A linear motor unit would let the recurrent motor→command
   // feedback drive unbounded activations within a few steps.
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &, LtcAcc Acc) {
+  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &G, LtcAcc Acc) {
     float Tau = plastix::GetField<TauTag>(U, Id);
     if (Tau <= 0.0f) Tau = 1.0f;
-    float Alpha = std::exp(-Hyper::Dt / Tau);
+    float Alpha = std::exp(-G.Dt / Tau);
     float Xprev = plastix::GetActivation(U, Id);
     float Pre   = Alpha * Xprev + Acc.Drive;
     float Xnew  = std::tanh(Pre);
@@ -188,7 +187,7 @@ struct EpropUpdate {
   // and the trace accumulates this with β decay across steps.
   PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t Dst,
                                                   size_t Src, auto &C,
-                                                  size_t Cid, auto &) {
+                                                  size_t Cid, auto &G) {
     using namespace plastix;
     float Xs   = GetActivation(U, Src);
     float Hpre = std::tanh(Xs);                  // pre-synaptic activation
@@ -199,15 +198,15 @@ struct EpropUpdate {
     float Sens = PhiPrime * Hpre;
 
     float &E = GetField<EligibilityTag>(C, Cid);
-    E = Hyper::BetaTrace * E + Sens;
+    E = G.BetaTrace * E + Sens;
 
     float L = GetField<LearningSignalTag>(U, Dst);
-    float Delta = Hyper::Lr * L * E;
-    if (Delta >  Hyper::ClipDelta) Delta =  Hyper::ClipDelta;
-    if (Delta < -Hyper::ClipDelta) Delta = -Hyper::ClipDelta;
+    float Delta = G.Lr * L * E;
+    if (Delta >  G.ClipDelta) Delta =  G.ClipDelta;
+    if (Delta < -G.ClipDelta) Delta = -G.ClipDelta;
     float Wnew = GetWeight(C, Cid) - Delta;
-    if (Wnew >  Hyper::WMax) Wnew =  Hyper::WMax;
-    if (Wnew < -Hyper::WMax) Wnew = -Hyper::WMax;
+    if (Wnew >  G.WMax) Wnew =  G.WMax;
+    if (Wnew < -G.WMax) Wnew = -G.WMax;
     GetWeight(C, Cid) = Wnew;
   }
 
@@ -220,6 +219,7 @@ struct EpropUpdate {
 // ---------------------------------------------------------------------------
 
 struct CcwcTraits : plastix::DefaultNetworkTraits<> {
+  using GlobalState  = Hyper;
   using ForwardPass  = LtcForward;
   using BackwardPass = LtcBackward;
   using Loss         = plastix::MSELoss;
@@ -539,17 +539,19 @@ int main(int Argc, char **Argv) {
     H.SeqLen     = std::max<size_t>(16, H.SeqLen / 2);
   }
 
-  Hyper::Dt        = H.Dt;
-  Hyper::Lr        = H.Lr;
-  Hyper::BetaTrace = H.BetaTrace;
-  Hyper::ClipDelta = H.ClipDelta;
-  Hyper::WMax      = H.WMax;
-
   // Build the network. Sine task is regression with 2 input dims, 2 output.
   uint64_t Seed = static_cast<uint64_t>(Args.Seed) * 7919ull + 13ull;
   auto N = std::make_unique<Net>(
       /*InputDim=*/2,
       NCPWiringBuilder{H.Units, H.OutputDim, H.KSparse, H.KRec, H.KFb, Seed});
+
+  // Stage runtime hyperparameters into the managed GlobalState; the policies
+  // read them on host or device through their Globals handle.
+  N->Global().Dt        = H.Dt;
+  N->Global().Lr        = H.Lr;
+  N->Global().BetaTrace = H.BetaTrace;
+  N->Global().ClipDelta = H.ClipDelta;
+  N->Global().WMax      = H.WMax;
 
   size_t NumInput = 2;
   size_t NumUnits = N->GetUnitAlloc().Size();
@@ -581,11 +583,11 @@ int main(int Argc, char **Argv) {
   // Initial point (untrained). Eval must run with Lr=0 because DoStep
   // still calls UpdateConn — leaving Lr at its training value here would
   // silently train on the val + test sets before epoch 1 begins.
-  float SavedLrInit = Hyper::Lr;
-  Hyper::Lr = 0.0f;
+  float SavedLrInit = N->Global().Lr;
+  N->Global().Lr = 0.0f;
   double InitVal  = EvalMse(*N, Val, NumInput);
   double InitTest = EvalMse(*N, Test, NumInput);
-  Hyper::Lr = SavedLrInit;
+  N->Global().Lr = SavedLrInit;
   auto Edges0 = bench::LiveEdgeSet(N->GetConnAlloc());
   Log.Log(0, NumUnits, NumEdges, &Edges0, &InitVal,
           {{"epoch", 0.0},
@@ -644,11 +646,11 @@ int main(int Argc, char **Argv) {
     // Eval: temporarily zero Lr so DoStep's UpdateConn becomes a no-op
     // multiplication. Eligibility still accumulates but is wiped at the
     // next ResetPerSequence — same trick as 06's snn-shd plan.
-    float SavedLr = Hyper::Lr;
-    Hyper::Lr = 0.0f;
+    float SavedLr = N->Global().Lr;
+    N->Global().Lr = 0.0f;
     double ValMse  = EvalMse(*N, Val, NumInput);
     double TestMse = EvalMse(*N, Test, NumInput);
-    Hyper::Lr = SavedLr;
+    N->Global().Lr = SavedLr;
 
     auto Edges = bench::LiveEdgeSet(N->GetConnAlloc());
     Log.Log(Ep, NumUnits, NumEdges, &Edges, &ValMse,
@@ -668,7 +670,7 @@ int main(int Argc, char **Argv) {
 
   // Final test pass (best-state would require a snapshot mechanism we don't
   // have — report the last-epoch number, mirroring 02_idempotent_imp).
-  Hyper::Lr = 0.0f;
+  N->Global().Lr = 0.0f;
   double FinalTest = EvalMse(*N, Test, NumInput);
 
   // ------------------------------------------------------------------

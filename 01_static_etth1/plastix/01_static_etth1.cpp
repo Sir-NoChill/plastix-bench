@@ -100,22 +100,29 @@ struct StaticBackward {
   }
 };
 
+// Runtime-tunable hyperparameters read by the (possibly device-side) policies.
+// These live in the network's GlobalState — staged from the host through
+// Net::Global() — rather than in host-side static members, which device code
+// cannot read under CUDA.
+struct StaticGlobals {
+  float Lr = 1e-3f;
+};
+
 // w_ij -= lr * (dL/dz_dst) * a_src. Standard SGD on float weights.
 struct StaticUpdateConn {
-  static float Lr;
   PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
                                                   size_t SrcId, auto &C,
-                                                  size_t ConnId, auto &) {
+                                                  size_t ConnId, auto &G) {
     float Grad = plastix::GetField<GradPreActTag>(U, DstId);
     float A = plastix::GetActivation(U, SrcId);
-    plastix::GetWeight(C, ConnId) -= Lr * Grad * A;
+    plastix::GetWeight(C, ConnId) -= G.Lr * Grad * A;
   }
   PLASTIX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
                                                   auto &, size_t, auto &) {}
 };
-float StaticUpdateConn::Lr = 1e-3f;
 
 struct StaticTraits : plastix::DefaultNetworkTraits<> {
+  using GlobalState = StaticGlobals;
   using ForwardPass = StaticForward;
   using BackwardPass = StaticBackward;
   using Loss = plastix::MSELoss;
@@ -342,7 +349,6 @@ int main(int Argc, char **Argv) {
     // PyTorch reference: epochs //= 4 in quick mode. Match that here.
     H.Epochs = std::max<size_t>(1, H.Epochs / 4);
   }
-  StaticUpdateConn::Lr = H.Lr;
 
   auto Raw = LoadEtth1(Args.DataDir, Args.Synthetic,
                        static_cast<uint32_t>(Args.Seed));
@@ -366,6 +372,9 @@ int main(int Argc, char **Argv) {
   float Limit = std::sqrt(6.0f / static_cast<float>(InDim + H.Hidden));
   uint64_t SeedBase = static_cast<uint64_t>(Args.Seed) * 1000ull + 7ull;
   auto N = BuildNetwork(InDim, OutDim, H, SeedBase, Limit);
+  // Stage the learning rate into the managed GlobalState; the UpdateConn
+  // policy reads it on host or device through its Globals handle.
+  N->Global().Lr = H.Lr;
 
   std::vector<std::vector<float>> Xva(D.X.begin() + NTr,
                                       D.X.begin() + NTr + NVa);
