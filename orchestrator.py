@@ -84,18 +84,20 @@ PLOTS_DIR = HERE / "_plots"
 
 # Impls in canonical order — the orchestrator presents them this way in
 # tables and plot legends.
-IMPL_ORDER = ("pytorch", "plastix", "cpp")
+IMPL_ORDER = ("pytorch", "plastix", "cpp", "cuda")
 IMPL_COLOUR = {
     "pytorch": "#d35a5a",
     "plastix": "#1f9d55",
     "cpp":     "#3a7bd5",
+    "cuda":    "#9b1fd6",
 }
 IMPL_LABEL = {
     "pytorch": "PyTorch",
     "plastix": "Plastix",
     "cpp":     "C++ (OpenBLAS)",
+    "cuda":    "CUDA (cuBLAS)",
 }
-IMPL_MARKER = {"pytorch": "s", "plastix": "o", "cpp": "D"}
+IMPL_MARKER = {"pytorch": "s", "plastix": "o", "cpp": "D", "cuda": "*"}
 
 
 @dataclass
@@ -136,7 +138,7 @@ WALL_KEYS   = ("wall_seconds",)
 # Order matters: a benchmark might have several of these — we want the
 # "final test number" (closest to a holdout score) where possible, then
 # fall back to whatever post-training summary it actually emits.
-TEST_KEYS   = ("test_mse", "test_metric", "test_acc",
+TEST_KEYS   = ("test_mse", "test_rmse", "test_metric", "test_acc",
                "val_acc_final", "val_mse_final", "val_loss_final",
                "test_acc_final", "test_mse_final")
 METRIC_KIND_KEYS = ("metric_kind",)
@@ -288,7 +290,8 @@ def _poll_peak_rss(pid: int, poll_interval_s: float = 0.05):
 
 def run_one(s: Sentinel, *, tag: str, build_dir: Path,
             extras: list[str], out_dir: Path,
-            quiet: bool = False) -> dict:
+            quiet: bool = False, device: str = "cpu",
+            timeout_s: float = 600.0) -> dict:
     """Invoke a sentinel and parse its summary CSV.
 
     The sentinel itself decides where to write — we pass `--out-dir` and
@@ -304,11 +307,19 @@ def run_one(s: Sentinel, *, tag: str, build_dir: Path,
     ]
     if s.impl != "pytorch":
         base_cmd += ["--build-dir", str(build_dir)]
+        # The C++ binaries default DataDir to a relative "data" (see
+        # common/{plastix,cpp}/common.hpp). Run from the repo root that
+        # resolves to ./data, which does not exist — the datasets live under
+        # common/pytorch/data. Without this the benches with a synthetic
+        # fallback (01-06) silently train on stand-in data and the ones
+        # without (08) hard-fail. Point every C++ impl at the real data root.
+        # (The PyTorch sentinels resolve this path themselves via common.py.)
+        base_cmd += ["--data-dir", str(HERE / "common" / "pytorch" / "data")]
     # `--device cpu` is only understood by the PyTorch impls. Passing it to
     # C++ binaries via the sentinel would surface in their CliArgs as an
     # unknown key + non-zero exit; gate on the impl.
     if s.impl == "pytorch":
-        base_cmd += ["--device", "cpu", "--no-plot"]
+        base_cmd += ["--device", device, "--no-plot"]
     base_cmd += extras
 
     if not quiet:
@@ -322,7 +333,20 @@ def run_one(s: Sentinel, *, tag: str, build_dir: Path,
              "OPENBLAS_NUM_THREADS": "1",
              "MKL_NUM_THREADS": "1"})
     mem_state, stop, poller = _poll_memory(proc.pid)
-    stdout, stderr = proc.communicate()
+    # Hard per-benchmark wall-clock cap: kill any run that exceeds it so a
+    # single slow (bench, impl) can't stall the whole sweep, and the rest still
+    # produce graphable results. Killed runs are reported and skipped.
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stop.set(); poller.join(timeout=0.2)
+        try:
+            proc.communicate(timeout=10)
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"{s.bench}/{s.impl} exceeded {timeout_s:.0f}s timeout — killed")
     stop.set(); poller.join(timeout=0.2)
     wall = time.perf_counter() - t0
     if proc.returncode != 0:
@@ -437,7 +461,8 @@ def cmd_run(args) -> None:
         try:
             r = run_one(s, tag=args.tag, build_dir=args.build_dir,
                         extras=extras, out_dir=per_dir,
-                        quiet=args.quiet)
+                        quiet=args.quiet, device=args.device,
+                        timeout_s=args.timeout)
             runs.append(r)
             print(f"  ok  {s.bench}/{s.impl}  wall={r['wall_seconds']:.3f}s  "
                   f"metric={r['metric']:.4f} ({r['metric_kind']})  "
@@ -1015,6 +1040,13 @@ def main() -> None:
                              "(layout matches the source tree)")
     sp_run.add_argument("--quick", action="store_true",
                         help="pass --quick to each sentinel")
+    sp_run.add_argument("--device", default="cpu",
+                        help="device for the pytorch impls (cpu|cuda); C++ and "
+                             "plastix impls are CPU/GPU by their build dir")
+    sp_run.add_argument("--timeout", type=float, default=600.0,
+                        help="per-benchmark wall-clock cap in seconds "
+                             "(default 600 = 10 min); exceeding it kills the "
+                             "run and skips it")
     sp_run.add_argument("--quiet", action="store_true")
     sp_run.add_argument("passthrough", nargs="*",
                         help="extra args forwarded to every sentinel")
