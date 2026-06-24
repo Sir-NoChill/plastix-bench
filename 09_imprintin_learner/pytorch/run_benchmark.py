@@ -44,12 +44,12 @@ from common import (  # noqa: E402
 )
 
 
-OBS_DIM = 2500
-PACKED_BYTES = (OBS_DIM + 7) // 8  # 313
-RECORD_BYTES = PACKED_BYTES + 1
-HEADER_BYTES = 16
+# Legacy v1 observation dimension. v1 files carry no obs_dim field; v2 files
+# state their own dimension in the header (obs_dim = n_freq_bins * n_mag_bins).
+LEGACY_OBS_DIM = 2500
+HEADER_BYTES = 16          # base header: magic(4) + version(4) + n_steps(8)
 MAGIC = b"APBD"
-FORMAT_VERSION = 1
+SUPPORTED_VERSIONS = (1, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -70,21 +70,32 @@ def _resolve_dataset(data_dir: Path) -> Path | None:
 
 
 def _load_apbd(path: Path, max_steps: int) -> tuple[np.ndarray, np.ndarray]:
-    """Returns (X, R) with X shape (N, 2500) uint8 in {0,1}, R shape (N,) float32."""
+    """Returns (X, R) with X shape (N, obs_dim) uint8 in {0,1}, R shape (N,) float32.
+
+    Handles both wire formats: v1 (16-byte header, obs_dim implicitly 2500) and
+    v2 (24-byte header carrying obs_dim = n_freq_bins * n_mag_bins). The record
+    stride is derived from obs_dim, so any box count loads correctly.
+    """
     with path.open("rb") as f:
         head = f.read(HEADER_BYTES)
         if head[:4] != MAGIC:
             raise RuntimeError(f"Not an APBD file (bad magic): {path}")
         version, n_steps = struct.unpack("<IQ", head[4:HEADER_BYTES])
-        if version != FORMAT_VERSION:
+        if version not in SUPPORTED_VERSIONS:
             raise RuntimeError(f"Unsupported APBD version {version}")
+        if version == 1:
+            obs_dim = LEGACY_OBS_DIM
+        else:  # v2: obs_dim follows the base header
+            (obs_dim,) = struct.unpack("<Q", f.read(8))
+        packed_bytes = (obs_dim + 7) // 8
+        record_bytes = packed_bytes + 1
         n = min(max_steps, n_steps) if max_steps > 0 else n_steps
-        body = np.frombuffer(f.read(n * RECORD_BYTES), dtype=np.uint8)
-    body = body.reshape(n, RECORD_BYTES)
-    obs_packed = body[:, :PACKED_BYTES]
-    rewards = body[:, PACKED_BYTES].view(np.int8).astype(np.float32)
+        body = np.frombuffer(f.read(n * record_bytes), dtype=np.uint8)
+    body = body.reshape(n, record_bytes)
+    obs_packed = body[:, :packed_bytes]
+    rewards = body[:, packed_bytes].view(np.int8).astype(np.float32)
     # LSB-first bit ordering, matching prepare-cpp.py / dataset.hpp.
-    X = np.unpackbits(obs_packed, axis=1, bitorder="little")[:, :OBS_DIM]
+    X = np.unpackbits(obs_packed, axis=1, bitorder="little")[:, :obs_dim]
     return X, rewards
 
 
@@ -247,8 +258,8 @@ def run(args) -> dict:
         "val_mse_final": round(full_mse, 6),
         "test_mse": round(test_mse, 6),
         "metric_kind": "mse",
-        "n_units": OBS_DIM,
-        "n_edges": OBS_DIM,
+        "n_units": int(X.shape[1]),
+        "n_edges": int(X.shape[1]),
         "seed": args.seed,
         **timer.summary_fields(wall),
     }

@@ -29,7 +29,9 @@ from the 09_imprintin_learner/cpp/examples/ sub-project, run via uv):
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
+import struct
 import subprocess
 import sys
 import urllib.request
@@ -129,8 +131,31 @@ def stage_soundfont(_data_dir: Path) -> None:
     _stream_download(SOUNDFONT_URL, SOUNDFONT_PATH, min_bytes=1_000_000)
 
 
-def stage_audio(_data_dir: Path) -> None:
-    print("[audio] generate 09 audio-prediction dataset.bin")
+def _apbd_obs_dim(path: Path) -> int | None:
+    """Read obs_dim from an APBD dataset.bin header (None if unreadable).
+    v1 files carry no obs_dim field → 2500; v2 stores it after the base header."""
+    try:
+        with path.open("rb") as f:
+            head = f.read(16)
+            if head[:4] != b"APBD":
+                return None
+            version = struct.unpack("<I", head[4:8])[0]
+            if version == 1:
+                return 2500
+            if version == 2:
+                return struct.unpack("<Q", f.read(8))[0]
+    except (OSError, struct.error):
+        return None
+    return None
+
+
+def stage_audio(_data_dir: Path, duration: int = 60, seed: int = 42,
+                n_freq_bins: int = 50, n_mag_bins: int = 50,
+                force: bool = False) -> None:
+    obs_dim = n_freq_bins * n_mag_bins
+    print(f"[audio] generate 09 audio-prediction dataset.bin "
+          f"(duration={duration}s, seed={seed}, boxes={obs_dim} "
+          f"= {n_freq_bins} freq x {n_mag_bins} mag)")
     if not SOUNDFONT_PATH.exists():
         raise SystemExit(
             "[audio] soundfont missing — run the `soundfont` stage first.")
@@ -141,17 +166,35 @@ def stage_audio(_data_dir: Path) -> None:
               "         then re-run: uv run python setup.py --stages audio")
         return
     out = EXAMPLES_DIR / "output" / "dataset.bin"
-    if out.exists():
-        print(f"  [skip] {_rel(out)} already present "
-              f"({out.stat().st_size / 1e6:.1f} MB)")
-        return
+    # Skip only when an existing dataset already matches the requested
+    # (duration, seed, boxes). duration/seed come from metadata.json; the box
+    # count (obs_dim) is read from the dataset.bin header so a new box count
+    # forces a regenerate even when audio length is unchanged.
+    if out.exists() and not force:
+        meta = EXAMPLES_DIR / "output" / "metadata.json"
+        try:
+            m = json.loads(meta.read_text())
+            matches = (int(m.get("duration", -1)) == duration
+                       and int(m.get("seed", -1)) == seed
+                       and _apbd_obs_dim(out) == obs_dim)
+        except (OSError, ValueError, json.JSONDecodeError):
+            matches = False
+        if matches:
+            print(f"  [skip] {_rel(out)} already present for "
+                  f"duration={duration}s seed={seed} boxes={obs_dim} "
+                  f"({out.stat().st_size / 1e6:.1f} MB) — pass --audio-force "
+                  f"to regenerate")
+            return
+        print(f"  [regen] existing dataset differs from requested "
+              f"duration={duration}s seed={seed} boxes={obs_dim}; regenerating")
     # prepare-cpp.py forwards to the apb generator; run it from the examples
     # dir so (a) the default ./FluidR3_GM.sf2 path resolves and (b) `uv run`
     # picks up examples/pyproject.toml, which declares the audio-gen deps
     # (pretty_midi / pyfluidsynth / soundfile) and the apb package itself.
     _run(["uv", "run", "python", "prepare-cpp.py",
           "--generate", "--data-dir", "output", "--output", "output/dataset.bin",
-          "--duration", "60", "--seed", "42"],
+          "--n-freq-bins", f"{n_freq_bins}", "--n-mag-bins", f"{n_mag_bins}",
+          "--duration", f"{duration}", "--seed", f"{seed}"],
          cwd=EXAMPLES_DIR)
     print(f"  [ok  ] {_rel(out)}")
 
@@ -182,6 +225,17 @@ def main() -> None:
                    help="comma-separated stages to skip")
     p.add_argument("--all", action="store_true",
                    help="run every stage, including `audio`")
+    p.add_argument("--audio-duration", type=int, default=60,
+                   help="length (s) of the 09 audio dataset (default: 60)")
+    p.add_argument("--audio-seed", type=int, default=42,
+                   help="RNG seed for the 09 audio dataset (default: 42)")
+    p.add_argument("--audio-freq-bins", type=int, default=50,
+                   help="09 audio: frequency boxes (spectrum columns; default: 50)")
+    p.add_argument("--audio-mag-bins", type=int, default=50,
+                   help="09 audio: magnitude boxes (rows; default: 50). Total "
+                        "observation dim = freq-bins * mag-bins.")
+    p.add_argument("--audio-force", action="store_true",
+                   help="regenerate the 09 audio dataset even if one exists")
     args = p.parse_args()
 
     if args.stages:
@@ -205,7 +259,14 @@ def main() -> None:
     print(f"stages: {', '.join(requested) or '(none)'}\n")
 
     for stage in requested:
-        STAGE_FNS[stage](data_dir)
+        if stage == "audio":
+            STAGE_FNS[stage](data_dir, duration=args.audio_duration,
+                             seed=args.audio_seed,
+                             n_freq_bins=args.audio_freq_bins,
+                             n_mag_bins=args.audio_mag_bins,
+                             force=args.audio_force)
+        else:
+            STAGE_FNS[stage](data_dir)
         print()
 
     print("setup complete.")
