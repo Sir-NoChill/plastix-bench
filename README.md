@@ -113,6 +113,71 @@ and `_plots/` (PNGs). See the `orchestrator.py` module docstring for the full
 plot-kind list (`accuracy`, `overlay`, `walltime`, `memory`, `phases`,
 `phase_stats`).
 
+## Paper summary tables
+
+`just tables` (run automatically at the end of every `run-*` pass) aggregates the
+archived runs into two paper-ready CSVs under `_results/`, one row per benchmark
+keyed by a short acronym (`bench_meta.ACRONYM`):
+
+- `phase_table.csv` — per-framework runtime **fractions** by phase
+  (`fwd/bwd/upd/prune/grow/uncat`, summing to 100%).
+- `memory_table.csv` — per-framework **memory** breakdown in MiB
+  (`dataset/weights/overhead/scratch/max`).
+
+Both pull `plastix/pytorch/cpp` from `runs_cpu.csv` and `cuda` from `runs_gpu.csv`
+and append the per-bench structural characteristics from `bench_meta.py`. Run them
+standalone with `just phase-table` / `just memory-table`. The memory table's
+`<fw>_vram` column is peak GPU VRAM (polled per-process via nvidia-smi; 0 on CPU).
+
+`just tables-gpu` (auto-run after `just run-gpu`) writes `{phase,memory}_table_gpu.csv`
+— the same tables but with **every** framework sourced from the GPU pass, so GPU
+timings + VRAM show for all of them (not just `cuda`).
+
+## Profiling (nsys / nvprof)
+
+Profile a bench's **GPU** binary under an NVIDIA profiler; reports land in
+`_profiles/`:
+
+```bash
+just profile 06_ccwc_ncp                 # auto (nsys, else nvprof)
+just profile 06_ccwc_ncp --tool both     # nsys + nvprof (--tool is a profile.py flag)
+just profile 06_ccwc_ncp -- --max-steps 200   # `--` forwards flags to the binary
+just profile-scaling                     # the 11_scaling_imprint CUDA plastix binary
+```
+
+Auto-selects **nsys** (Nsight Systems → `.nsys-rep` timeline + kernel/API summary
+CSVs) and falls back to **nvprof** (legacy → per-kernel CSV). Needs the CUDA build
+(`build-cuda`) and a GPU; a missing profiler is reported and skipped. See
+`profile.py`.
+
+## Scaling sweep
+
+`just scaling` runs the `11_scaling_imprint` bench (imprinting-style net) from
+~10k to ~10M neurons, Plastix vs PyTorch, one subprocess per size for a clean
+per-size peak RSS, and writes the long-format `_results/scaling_table.csv`
+(`neurons, framework, wall_per_step_ns, peak_rss_mb, status`). It records each
+framework's OOM/timeout ceiling and is opt-in (not part of `run-*`).
+`just scaling -- --max-neurons 100000` runs a quick subset.
+
+## Optional frameworks: JAX + bio-inspired baselines
+
+Heavy/niche frameworks are optional extras (`uv sync --extra jax|snn|nengo|evosax`),
+kept out of the default env:
+
+- **JAX** ports the **whole suite (01-10)** (`<bench>/jax/`, on `common/jax/`);
+  a `jax_*` column in the tables. Static-topology benches jit cleanly; the
+  dynamic ones expose XLA's recompile-on-shape-change wall (bench 09 ~160×) —
+  see **`docs/jax_expressibility.md`**.
+- **SNN frameworks** — spiking ports of **01-05** in snnTorch (`<bench>/snn/`) and
+  **01-02** in Norse (`<bench>/norse/`), first-class impls with `snn_*`/`norse_*`
+  table columns and a `--timesteps` knob. Finding: all five are expressible
+  (eager torch + stateless-per-forward LIF makes runtime grow/prune natural) — see
+  **`docs/snn_expressibility.md`**.
+- **Baseline frameworks** (TensorNEAT, an SNN stack, Nengo, evosax) are
+  paradigm-different comparison baselines under `baselines/`; `just baselines`
+  runs them into the separate `_results/baselines_table.csv` (uninstalled ones
+  report `status=skipped`). See `baselines/README.md`.
+
 ## Layout convention
 
 ```
@@ -146,7 +211,7 @@ library link).
 ## PhaseTimer and the summary CSV schema
 
 Every training inner loop wraps its `forward` / `loss` / `backward` /
-`update` / `structural` / `reset` phases with a `PhaseTimer` (both languages
+`update` / `prune` / `grow` / `reset` phases with a `PhaseTimer` (both languages
 ship one — see `common/{pytorch,cpp,plastix}/common.{py,hpp}`). The timer uses
 Welford's online algorithm so the per-run summary CSV carries **mean + std**
 for each phase plus `step_count`, `step_ns_mean`, and `other_ns_mean` (slack
@@ -165,7 +230,8 @@ forward_ns_mean,    forward_ns_std,
 loss_ns_mean,       loss_ns_std,
 backward_ns_mean,   backward_ns_std,
 update_ns_mean,     update_ns_std,
-structural_ns_mean, structural_ns_std,
+prune_ns_mean,      prune_ns_std,
+grow_ns_mean,       grow_ns_std,
 reset_ns_mean,      reset_ns_std,
 other_ns_mean,
 ```
@@ -194,8 +260,11 @@ Each phase column means the same thing across pytorch/plastix/cpp:
   and `update` stays at zero.
 - `update`    — optimizer step (SGD on each weight; `DoUpdateUnit` +
   `DoUpdateConn` in Plastix).
-- `structural` — `Prune* + Add*` in Plastix; tenure/remove/generate in the
-  imprinting learner library. Zero for pytorch.
+- `prune`     — `DoPruneUnits + DoPruneConnections` in Plastix; tenure/remove
+  (the shrink half) in the imprinting learner library. Zero for static nets.
+- `grow`      — `DoAddUnits + DoAddConnections` in Plastix; generate/snapshot
+  (the spawn half) in the imprinting learner library. Zero for static nets.
+  (`prune` + `grow` together are the old single `structural` phase.)
 - `reset`     — `DoResetGlobalState` in Plastix; zero elsewhere.
 - `other`     — wall-step minus the sum of phase means: data movement, Python
   loop overhead, `.item()` syncs, host↔device transfers.
