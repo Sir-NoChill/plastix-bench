@@ -58,12 +58,19 @@ struct HP {
   size_t FanIn = 32;
   size_t NumClasses = 20;
   size_t Epochs = 80;
-  float Lr = 1e-3f;
+  // Lr is scaled for the (1-BetaTrace)-normalised eligibility trace (see
+  // EpropUpdateConn): the trace is ~10x smaller than the old running sum, so
+  // the effective step matches the historical 1e-3 at the un-normalised scale.
+  float Lr = 1e-2f;
   float Beta = 0.9f;          // membrane decay
   float BetaTrace = 0.9f;     // eligibility-trace decay
   float Threshold = 1.0f;
   float SurrogateSlope = 25.0f;
-  float WeightScale = 1.0f;   // multiplier on xavier init for fc_in
+  // WeightScale multiplies the Xavier init on the K-sparse input->hidden layer.
+  // At 1.0 the hidden units almost never reach threshold (~2.75% firing) and
+  // the network sits at chance; ~4.0 gives a healthy ~15-20% firing rate so
+  // e-prop has spikes to learn from.
+  float WeightScale = 4.0f;
   float FeedbackScale = 1.0f; // scale of random-feedback weights B
   size_t MaxTrainRows = 0;    // 0 = no cap
   size_t MaxEvalRows = 0;     // 0 = full val/test
@@ -205,11 +212,12 @@ struct LifBackward {
       plastix::GetField<LearningSignalTag>(U, Id) =
           plastix::GetBackwardAcc(U, Id);
     } else {
-      float Z = plastix::GetField<PreActTag>(U, Id);
-      float Slope = G.SurrogateSlope;
-      float Den = 1.0f + Slope * std::fabs(Z);
-      float Psi = 1.0f / (Den * Den);
-      plastix::GetField<LearningSignalTag>(U, Id) = Up * Psi;
+      // e-prop learning signal for a hidden unit is the feedback-projected
+      // error L_j = sum_k B_jk * delta_k (== `Up`). The surrogate psi_j
+      // belongs to the eligibility trace e_ji = filter(psi_j * z_i), applied
+      // in EpropUpdateConn — NOT here. Multiplying by psi again would square
+      // it (delta_w ~ psi_j^2), which crushes input->hidden feature learning.
+      plastix::GetField<LearningSignalTag>(U, Id) = Up;
     }
   }
 };
@@ -235,8 +243,12 @@ struct EpropUpdateConn {
       float Den = 1.0f + Slope * std::fabs(Z);
       Psi = 1.0f / (Den * Den);
     }
+    // Low-pass eligibility filter with the (1-BetaT) normaliser. Without it
+    // the running sum saturates at ~1/(1-BetaT) (~10x for BetaT=0.9), which
+    // silently inflates the effective learning rate ~10x and makes the readout
+    // logits diverge (rising CE loss). Normalising keeps the trace O(input).
     float &Elig = plastix::GetField<EligibilityTag>(C, ConnId);
-    Elig = BetaT * Elig + PreSpk * Psi;
+    Elig = BetaT * Elig + (1.0f - BetaT) * (PreSpk * Psi);
 
     float L = plastix::GetField<LearningSignalTag>(U, DstId);
     if (L != 0.0f && Lr != 0.0f)
@@ -268,7 +280,7 @@ struct SparseSnnTraits : plastix::DefaultNetworkTraits<EpropGlobals> {
       plastix::alloc::SOAField<EligibilityTag, float>,
       plastix::alloc::SOAField<FeedbackTag, float>>;
   static constexpr size_t UnitCapacity = 4096;
-  static constexpr size_t ConnCapacity = 32768; // ~13 k live, headroom
+  static constexpr size_t ConnCapacity = 65536; // headroom for fan-in up to ~235
 };
 static_assert(plastix::NetworkTraits<SparseSnnTraits>);
 
@@ -600,6 +612,9 @@ int main(int Argc, char **Argv) {
       H.MaxEvalRows = 512;
   }
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   // .plxbin caches live alongside SHD_cache produced by snn-shd/data.py.
   auto TrainPath =
       Args.DataDir / "SHD_cache" / ("train_n" + std::to_string(H.NBins) + ".plxbin");
@@ -616,6 +631,7 @@ int main(int Argc, char **Argv) {
   auto Train = LoadPlxbin(TrainPath);
   std::cout << "[data] loading " << TestPath << "\n";
   auto Test = LoadPlxbin(TestPath);
+  MP.EndDataset();
   size_t NIn = Train.NChannels;
   std::cout << "[info] train=" << Train.NSamples << " test=" << Test.NSamples
             << " n_in=" << NIn << " n_hid=" << H.NHid
@@ -631,6 +647,7 @@ int main(int Argc, char **Argv) {
                        H.WeightScale},
       DenseOutputLayer{H.NumClasses, SeedBase + 2, H.Beta, H.Threshold,
                        1.0f, H.FeedbackScale}));
+  MP.EndWeights();
 
   // The Network constructor folds builders left-to-right; OutputRange lives
   // at the last layer's UnitRange. We need the hidden range for firing-rate
@@ -790,6 +807,7 @@ int main(int Argc, char **Argv) {
   S.Set("ablation_drop", FinalTest - ShuffledTest);
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  test_acc=" << FinalTest

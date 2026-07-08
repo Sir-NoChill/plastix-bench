@@ -79,12 +79,16 @@ struct HP {
   size_t FanIn = 32;
   size_t NumClasses = 20;
   size_t Epochs = 80;
-  float Lr = 1e-3f;
+  // Lr scaled for the (1-BetaTrace)-normalised eligibility trace (see EpropStep);
+  // matches the CPU/plastix default so GPU and CPU compute the same update.
+  float Lr = 1e-2f;
   float Beta = 0.9f;           // membrane decay
   float BetaTrace = 0.9f;      // eligibility-trace decay
   float Threshold = 1.0f;
   float SurrogateSlope = 25.0f;
-  float WeightScale = 1.0f;
+  // 1.0 leaves the K-sparse hidden layer almost silent (~2.75% firing) and the
+  // net at chance; ~4.0 gives a healthy ~15-20% firing rate for e-prop.
+  float WeightScale = 4.0f;
   float FeedbackScale = 1.0f;
   float ClipDelta = 0.1f;
   float WMax = 5.0f;
@@ -176,13 +180,6 @@ __global__ void Surrogate(const float *Z, float *Psi, float slope, size_t N) {
     return;
   float den = 1.0f + slope * fabsf(Z[I]);
   Psi[I] = 1.0f / (den * den);
-}
-
-// L_hid *= psi (per-unit gate after the B_out^T·L_out gemv).
-__global__ void GateByPsi(float *LHid, const float *Psi, size_t N) {
-  size_t I = blockIdx.x * blockDim.x + threadIdx.x;
-  if (I < N)
-    LHid[I] *= Psi[I];
 }
 
 // Masked clipped W_in step. dW[h,i] = lr * L_hid[h] * E_in[h,i], clipped, then
@@ -404,25 +401,31 @@ struct Model {
     // 2. Surrogate psi (reused for elig + gate).
     Surrogate<<<Grid(NHid, B), B>>>(ZHid, Psi, H.SurrogateSlope, NHid);
 
-    // L_hid = (B_out^T · L_out) ⊙ psi.
+    // L_hid = B_out^T · L_out  (feedback-projected error only). The surrogate
+    // psi belongs to the eligibility trace below (e-prop), NOT here — gating
+    // L_hid by psi too would square it (delta_w ~ psi^2) and crush input->hidden
+    // feature learning. This mirrors the CPU LifBackward fix.
     //   RowMajor Trans (NOut x NHid) * L_out  =>  col-major OP_N (NHid x NOut)
     CUBLAS_CHECK(cublasSgemv(Bl, CUBLAS_OP_N, (int)NHid, (int)NOut, &One, BOut,
                              (int)NHid, LOut, 1, &Zero, LHid, 1));
-    GateByPsi<<<Grid(NHid, B), B>>>(LHid, Psi, NHid);
 
-    // 3. Eligibility traces (rank-1 updates).
-    //   E_in[h,i]  = beta_trace·E_in  + psi[h]·u[i]
-    //   E_out[o,h] = beta_trace·E_out + 1·spk[h]
+    // 3. Eligibility traces — low-pass filter with the (1-beta_trace)
+    //    normaliser so the trace stays O(input) instead of saturating at
+    //    ~1/(1-beta_trace) (~10x) and silently inflating the effective LR.
+    //    Matches the CPU EpropUpdateConn fix.
+    //   E_in[h,i]  = beta_trace·E_in  + (1-beta_trace)·psi[h]·u[i]
+    //   E_out[o,h] = beta_trace·E_out + (1-beta_trace)·spk[h]
+    const float OneMinusBeta = 1.0f - beta_trace;
     CUBLAS_CHECK(cublasSscal(Bl, (int)(NHid * NIn), &beta_trace, EIn, 1));
     // cblas_sger RowMajor (NHid x NIn) A += psi(len NHid) * u(len NIn)^T
-    //   => col-major (NIn x NHid): cublasSger(NIn, NHid, 1, u, 1, psi, 1, A, NIn)
-    CUBLAS_CHECK(cublasSger(Bl, (int)NIn, (int)NHid, &One, dU, 1, Psi, 1, EIn,
-                            (int)NIn));
+    //   => col-major (NIn x NHid): cublasSger(NIn, NHid, a, u, 1, psi, 1, A, NIn)
+    CUBLAS_CHECK(cublasSger(Bl, (int)NIn, (int)NHid, &OneMinusBeta, dU, 1, Psi, 1,
+                            EIn, (int)NIn));
     CUBLAS_CHECK(cublasSscal(Bl, (int)(NOut * NHid), &beta_trace, EOut, 1));
     // cblas_sger RowMajor (NOut x NHid) A += ones(len NOut) * spk(len NHid)^T
-    //   => col-major (NHid x NOut): cublasSger(NHid, NOut, 1, spk, 1, ones, 1, A, NHid)
-    CUBLAS_CHECK(cublasSger(Bl, (int)NHid, (int)NOut, &One, SpkHid, 1, Ones, 1,
-                            EOut, (int)NHid));
+    //   => col-major (NHid x NOut): cublasSger(NHid, NOut, a, spk, 1, ones, 1, A, NHid)
+    CUBLAS_CHECK(cublasSger(Bl, (int)NHid, (int)NOut, &OneMinusBeta, SpkHid, 1,
+                            Ones, 1, EOut, (int)NHid));
 
     // 4. Weight step — only at terminal step (target >= 0).
     if (target < 0)
@@ -550,6 +553,9 @@ int main(int Argc, char **Argv) {
     if (H.MaxEvalRows == 0)  H.MaxEvalRows  = 512;
   }
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   auto TrainPath = Args.DataDir / "SHD_cache" /
                    ("train_n" + std::to_string(H.NBins) + ".plxbin");
   auto TestPath  = Args.DataDir / "SHD_cache" /
@@ -565,6 +571,7 @@ int main(int Argc, char **Argv) {
   auto Train = LoadPlxbin(TrainPath);
   std::cout << "[data] loading " << TestPath << "\n";
   auto Test = LoadPlxbin(TestPath);
+  MP.EndDataset();
   size_t NIn = Train.NChannels;
   std::cout << "[info] cuda snn_shd  train=" << Train.NSamples
             << " test=" << Test.NSamples << " n_in=" << NIn
@@ -579,6 +586,7 @@ int main(int Argc, char **Argv) {
   uint64_t SeedBase = static_cast<uint64_t>(Args.Seed) * 1000ull + 41ull;
   M.Build(NIn, H.NHid, H.NumClasses, H.FanIn,
           H.WeightScale, H.FeedbackScale, SeedBase + 1, Bl);
+  MP.EndWeights();
   size_t NConns = M.NLiveIn + M.NOut * M.NHid;
   std::cout << "[info] live conns=" << NConns
             << "  (vs " << (NIn * H.NHid + H.NHid * H.NumClasses)
@@ -712,6 +720,7 @@ int main(int Argc, char **Argv) {
   S.Set("n_units", static_cast<int>(NIn + H.NHid + H.NumClasses));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  test_acc=" << FinalTest
