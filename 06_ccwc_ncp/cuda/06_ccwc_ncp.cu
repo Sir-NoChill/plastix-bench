@@ -887,8 +887,12 @@ int main(int Argc, char **Argv) {
 
   int BatchCap = (int)H.Batch;
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   Model Mod;
   Mod.Build(H, Rng, Bl, BatchCap);
+  MP.EndWeights();
 
   size_t NumEdges = Mod.Msk.LiveEdges;
   size_t NumParams = Mod.DenseParamCount();
@@ -905,6 +909,7 @@ int main(int Argc, char **Argv) {
   auto Train = MakeSine(H.TrainSeqs, H.SeqLen, H.NoiseStd, Seed ^ 0xa1a1ull);
   auto Val   = MakeSine(H.ValSeqs,   H.SeqLen, H.NoiseStd, Seed ^ 0xb2b2ull);
   auto Test  = MakeSine(H.TestSeqs,  H.SeqLen, H.NoiseStd, Seed ^ 0xc3c3ull);
+  MP.EndDataset();
 
   auto [HistPath, SummaryPath, LogPath] = bench::OutputPaths(Args, "ccwc_ncp");
   (void)LogPath;
@@ -990,7 +995,7 @@ int main(int Argc, char **Argv) {
   Log.Flush();
 
   bench::SummaryWriter Sum;
-  Sum.Set("workload", std::string{"07_ccwc_ncp"});
+  Sum.Set("workload", std::string{"06_ccwc_ncp"});
   Sum.Set("dataset", std::string{"synthetic-sine"});
   Sum.Set("task",    std::string{"sine"});
   Sum.Set("backend", std::string{"cuda-ltc-bptt"});
@@ -1015,6 +1020,7 @@ int main(int Argc, char **Argv) {
   Sum.Set("test_mse", FinalTest);
   Sum.Set("seed",     Args.Seed);
   Timer.WriteSummary(Sum, Wall);
+  MP.WriteSummary(Sum);
   Sum.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  final_test_mse=" << FinalTest << "\n";
