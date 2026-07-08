@@ -503,7 +503,7 @@ int main(int Argc, char **Argv) {
     size_t KSparse    = 4;
     size_t KRec       = 4;
     size_t KFb        = 2;
-    size_t SeqLen     = 48;
+    size_t SeqLen     = 64;  // match cpp/pytorch/jax so the sine task is identical
     size_t TrainSeqs  = 256;
     size_t ValSeqs    = 64;
     size_t TestSeqs   = 64;
@@ -539,11 +539,15 @@ int main(int Argc, char **Argv) {
     H.SeqLen     = std::max<size_t>(16, H.SeqLen / 2);
   }
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   // Build the network. Sine task is regression with 2 input dims, 2 output.
   uint64_t Seed = static_cast<uint64_t>(Args.Seed) * 7919ull + 13ull;
   auto N = std::make_unique<Net>(
       /*InputDim=*/2,
       NCPWiringBuilder{H.Units, H.OutputDim, H.KSparse, H.KRec, H.KFb, Seed});
+  MP.EndWeights();
 
   // Stage runtime hyperparameters into the managed GlobalState; the policies
   // read them on host or device through their Globals handle.
@@ -574,6 +578,7 @@ int main(int Argc, char **Argv) {
                         Seed ^ 0xb2b2ull);
   auto Test  = MakeSine(H.TestSeqs,  H.SeqLen, H.NoiseStd,
                         Seed ^ 0xc3c3ull);
+  MP.EndDataset();
 
   auto [HistPath, SummaryPath, LogPath] =
       bench::OutputPaths(Args, "ccwc_ncp");
@@ -740,7 +745,7 @@ int main(int Argc, char **Argv) {
   TestCsv.Write(bench::TestCsvPath(Args, "ccwc_ncp"));
 
   bench::SummaryWriter S;
-  S.Set("workload", std::string{"07_ccwc_ncp"});
+  S.Set("workload", std::string{"06_ccwc_ncp"});
   S.Set("dataset", std::string{"synthetic-sine"});
   S.Set("task",    std::string{"sine"});
   S.Set("n_in",    static_cast<int>(NumInput));
@@ -761,6 +766,7 @@ int main(int Argc, char **Argv) {
   S.Set("test_mse", FinalTest);
   S.Set("seed",     Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  final_test_mse=" << FinalTest
