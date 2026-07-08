@@ -36,6 +36,7 @@ sys.path.insert(0, str(HERE.parents[1] / "common/pytorch"))
 sys.path.insert(0, str(HERE))
 
 from common import (  # noqa: E402
+    MemoryProbe,
     PhaseTimer,
     StructuralLog,
     add_common_args,
@@ -118,6 +119,9 @@ def run(args) -> dict:
     np.random.seed(args.seed)
     device = resolve_device(args.device)
 
+    probe = MemoryProbe()
+    probe.start()
+
     n_bins = args.n_bins // (2 if args.quick else 1)
     n_bins = max(20, n_bins)
     train_ds, val_ds, test_ds, n_in, n_classes = load_shd(
@@ -126,6 +130,7 @@ def run(args) -> dict:
     train_loader, val_loader, test_loader = make_loaders(
         train_ds, val_ds, test_ds, batch=args.batch,
     )
+    probe.end_dataset()
 
     # If --model gru, build a recurrent SNN first to source the parameter
     # budget, then build the matched GRU.
@@ -151,6 +156,7 @@ def run(args) -> dict:
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr,
                            betas=(0.9, 0.999))
+    probe.end_weights()
 
     hist_path, summary_path, plot_path = output_paths(args, "snn_shd")
     log = StructuralLog(hist_path)
@@ -229,6 +235,7 @@ def run(args) -> dict:
         "firing_rate_final": round(test_rate, 6),
         "seed": args.seed,
         **timer.summary_fields(wall),
+        **probe.summary_fields(),
     }
     write_summary_csv([summary], summary_path, columns=list(summary.keys()))
 

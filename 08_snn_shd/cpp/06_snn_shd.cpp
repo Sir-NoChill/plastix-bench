@@ -413,6 +413,9 @@ static double MeanFiringRate(Model &M, const Dataset &D, const HP &H,
 int main(int Argc, char **Argv) {
   auto Args = bench::CliArgs::Parse(Argc, Argv);
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   HP H;
   H.NBins         = static_cast<size_t>(Args.GetInt("n-bins",   H.NBins));
   H.NHid          = static_cast<size_t>(Args.GetInt("n-hid",    H.NHid));
@@ -456,6 +459,7 @@ int main(int Argc, char **Argv) {
   auto Train = LoadPlxbin(TrainPath);
   std::cout << "[data] loading " << TestPath << "\n";
   auto Test = LoadPlxbin(TestPath);
+  MP.EndDataset();
   size_t NIn = Train.NChannels;
   std::cout << "[info] train=" << Train.NSamples << " test=" << Test.NSamples
             << " n_in=" << NIn << " n_hid=" << H.NHid
@@ -467,6 +471,7 @@ int main(int Argc, char **Argv) {
   uint64_t SeedBase = static_cast<uint64_t>(Args.Seed) * 1000ull + 41ull;
   M.Build(NIn, H.NHid, H.NumClasses, H.FanIn,
           H.WeightScale, H.FeedbackScale, SeedBase + 1);
+  MP.EndWeights();
   size_t NConns = M.NLiveIn + M.NOut * M.NHid;
   std::cout << "[info] live conns=" << NConns
             << "  (vs " << (NIn * H.NHid + H.NHid * H.NumClasses)
@@ -595,6 +600,7 @@ int main(int Argc, char **Argv) {
   S.Set("ablation_drop", FinalTest - ShuffledTest);
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  test_acc=" << FinalTest
