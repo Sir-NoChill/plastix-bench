@@ -33,6 +33,7 @@ sys.path.insert(0, str(HERE.parents[1] / "common/pytorch"))
 sys.path.insert(0, str(HERE))
 
 from common import (  # noqa: E402
+    MemoryProbe,
     PhaseTimer,
     StructuralLog,
     add_common_args,
@@ -167,7 +168,8 @@ def evaluate(model, loader, device, metric_kind: str,
 # ---------------------------------------------------------------------------
 
 def run_one_model(args, model_name: str, loaders, input_size: int,
-                  n_out: int, metric_kind: str, device: str) -> dict:
+                  n_out: int, metric_kind: str, device: str,
+                  probe: MemoryProbe, measure_weights: bool = False) -> dict:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
@@ -205,6 +207,10 @@ def run_one_model(args, model_name: str, loaders, input_size: int,
           f"batch={args.batch}")
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # First model's construction is representative of the run's weight RSS;
+    # only measure it once so the delta isn't summed across all three models.
+    if measure_weights:
+        probe.end_weights()
     best_metric = (-1.0 if metric_kind == "acc" else float("inf"))
     best_state = None
 
@@ -263,6 +269,7 @@ def run_one_model(args, model_name: str, loaders, input_size: int,
         "test_metric": round(t_metric, 6),
         "seed": args.seed,
         **timer.summary_fields(wall),
+        **probe.summary_fields(),
     }
     write_summary_csv([summary], summary_path, columns=list(summary.keys()))
 
@@ -312,15 +319,21 @@ def run_one_model(args, model_name: str, loaders, input_size: int,
 
 def run(args) -> list[dict]:
     device = resolve_device(args.device)
+
+    probe = MemoryProbe()
+    probe.start()
+
     loaders_and_meta = _make_task(args)
     loaders = loaders_and_meta[:3]
     input_size, n_out, metric_kind = loaders_and_meta[3:]
+    probe.end_dataset()
     selected = ["A", "B", "C"] if args.model == "all" else [args.model]
 
     summaries: list[dict] = []
-    for name in selected:
+    for i, name in enumerate(selected):
         summaries.append(run_one_model(
             args, name, loaders, input_size, n_out, metric_kind, device,
+            probe, measure_weights=(i == 0),
         ))
 
     # Joint summary: one row per model, plus a 'params_ratio' column for the
