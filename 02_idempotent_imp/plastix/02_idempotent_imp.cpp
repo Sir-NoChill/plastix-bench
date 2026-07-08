@@ -349,6 +349,9 @@ int main(int Argc, char **Argv) {
     H.MaxRounds = std::max<size_t>(2, H.MaxRounds / 3);
   }
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   auto Train = SynthUcr(H.NPerClass, H.NumClasses, H.InLen, H.Snr,
                         static_cast<uint32_t>(Args.Seed));
   auto Test =
@@ -356,6 +359,7 @@ int main(int Argc, char **Argv) {
                H.Snr, static_cast<uint32_t>(Args.Seed + 1000));
   NormaliseInstance(Train.X);
   NormaliseInstance(Test.X);
+  MP.EndDataset();
   std::cout << "[info] InLen=" << H.InLen << " Classes=" << H.NumClasses
             << " Hidden=" << H.Hidden << " Depth=" << H.Depth
             << " Train=" << Train.X.size() << " Test=" << Test.X.size()
@@ -364,6 +368,7 @@ int main(int Argc, char **Argv) {
   float Limit = std::sqrt(6.0f / static_cast<float>(H.InLen + H.Hidden));
   uint64_t SeedBase = static_cast<uint64_t>(Args.Seed) * 1000ull + 11ull;
   auto N = Build(H, SeedBase, Limit);
+  MP.EndWeights();
   N->Global().Lr = H.Lr;
 
   auto [HistPath, SummaryPath, LogPath] =
@@ -470,6 +475,7 @@ int main(int Argc, char **Argv) {
   S.Set("fixed_point_reached", static_cast<int>(FixedPoint));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  rounds=" << FinalRound

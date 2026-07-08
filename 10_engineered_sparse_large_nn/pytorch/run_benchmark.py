@@ -37,6 +37,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common/pytorch"))
 from common import (  # noqa: E402
+    MemoryProbe,
     PhaseTimer,
     StructuralLog,
     add_common_args,
@@ -127,7 +128,7 @@ def run_loop(
     layer: np.ndarray, edges: np.ndarray,
     X: np.ndarray, Y: np.ndarray,
     *, n_steps: int, log_every: int, log: StructuralLog,
-    device: str, timer: PhaseTimer,
+    device: str, timer: PhaseTimer, probe: MemoryProbe | None = None,
 ):
     dev = torch.device(device)
 
@@ -153,6 +154,10 @@ def run_loop(
 
     Xt = torch.from_numpy(X).to(dev)
     Yt = torch.from_numpy(Y).to(dev)
+    # Edge/activation state (weights, traces, on-device stream copies) is the
+    # constructed footprint here; there's no separate nn.Module to measure.
+    if probe is not None:
+        probe.end_weights()
 
     lcg = LCG(LCG_SEED)
 
@@ -197,8 +202,13 @@ def run_loop(
                  layer_list, max_hidden_layer) = _grow(
                     cur_units, act, hidden_mask, src, dst, w, elig,
                     layer_list, max_hidden_layer, output_id, lcg, dev)
+                timer.mark_grow()
                 src, dst, w, elig = _shrink(src, dst, w, elig, output_id, lcg)
-            timer.mark_structural()
+                timer.mark_prune()
+            else:
+                # keep both phases sampled every step (≈0 when no structural op)
+                timer.mark_grow()
+                timer.mark_prune()
             timer.step_done()
 
             d2 = float(delta_t) ** 2
@@ -315,6 +325,9 @@ def run(args) -> dict:
     np.random.seed(args.seed)
     device = resolve_device(args.device)
 
+    probe = MemoryProbe()
+    probe.start()
+
     path = _resolve_topology(args.data_dir)
     if path is None:
         raise SystemExit(
@@ -324,6 +337,7 @@ def run(args) -> dict:
         )
 
     n_in, n_units, output_id, layer, edges, X, Y = _load_topology(path)
+    probe.end_dataset()
     n_steps = X.shape[0]
     if args.max_steps > 0:
         n_steps = min(n_steps, args.max_steps)
@@ -346,7 +360,7 @@ def run(args) -> dict:
     test_mse, final_units, final_edges = run_loop(
         n_in, n_units, output_id, layer, edges, X, Y,
         n_steps=n_steps, log_every=log_every, log=log,
-        device=device, timer=timer,
+        device=device, timer=timer, probe=probe,
     )
     wall = time.perf_counter() - t0
 
@@ -363,6 +377,7 @@ def run(args) -> dict:
         "n_edges": int(final_edges),
         "seed": args.seed,
         **timer.summary_fields(wall),
+        **probe.summary_fields(),
     }
     write_summary_csv([summary], summary_path, columns=list(summary.keys()))
 

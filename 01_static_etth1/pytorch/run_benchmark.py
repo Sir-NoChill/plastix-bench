@@ -41,6 +41,7 @@ from torch.utils.data import DataLoader, TensorDataset
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common/pytorch"))
 from common import (  # noqa: E402
     PHASE_COLUMNS,
+    MemoryProbe,
     PhaseTimer,
     StructuralLog,
     add_common_args,
@@ -193,6 +194,9 @@ def run(args) -> dict:
     np.random.seed(args.seed)
     device = resolve_device(args.device)
 
+    probe = MemoryProbe()
+    probe.start()
+
     data = load_etth1(args.data_dir, args.synthetic)
     n_train = int(0.7 * len(data))
     mu = data[:n_train].mean(0)
@@ -212,6 +216,7 @@ def run(args) -> dict:
         TensorDataset(Xtr, Ytr),
         batch_size=args.batch, shuffle=True, drop_last=True,
     )
+    probe.end_dataset()
 
     model = StaticMLP(
         in_dim=X.shape[1], out_dim=Y.shape[1],
@@ -221,6 +226,7 @@ def run(args) -> dict:
     # With reduction='sum' the cumulative per-batch gradient magnitude is
     # already comparable to Plastix's, so the same nominal lr works.
     opt = torch.optim.SGD(model.parameters(), lr=args.lr)
+    probe.end_weights()
 
     hist_path, summary_path, plot_path = output_paths(args, "static_etth1")
     log = StructuralLog(hist_path)
@@ -270,6 +276,7 @@ def run(args) -> dict:
         "jaccard_max": round(max(r["jaccard"] for r in log.records), 6),
         "seed": args.seed,
         **timer.summary_fields(wall),
+        **probe.summary_fields(),
     }
     write_summary_csv(
         [summary], summary_path,

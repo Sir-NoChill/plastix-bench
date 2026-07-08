@@ -38,6 +38,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common/pytorch"))
 from common import (  # noqa: E402
+    MemoryProbe,
     PhaseTimer,
     StructuralLog,
     add_common_args,
@@ -273,6 +274,9 @@ def stream(args) -> dict:
     np.random.seed(args.seed)
     device = resolve_device(args.device)
 
+    probe = MemoryProbe()
+    probe.start()
+
     if args.synthetic:
         Xnp, ynp = synth_drift(n=args.max_steps * args.batch + 5000, dim=8,
                                seed=args.seed)
@@ -308,10 +312,12 @@ def stream(args) -> dict:
     n_train = int(0.85 * len(X))
     X_test = X[n_train:]
     y_test = y[n_train:]
+    probe.end_dataset()
 
     model = GrowableMLP(in_dim, n_classes, hidden=args.init_hidden,
                         device=device).to(device)
     opt = torch.optim.SGD(model.parameters(), lr=args.lr)
+    probe.end_weights()
 
     hist_path, summary_path, plot_path = output_paths(args, "bursty_elec2")
     log = StructuralLog(hist_path)
@@ -443,6 +449,7 @@ def stream(args) -> dict:
         "jaccard_max": round(max(r["jaccard"] for r in log.records), 6),
         "seed": args.seed,
         **timer.summary_fields(wall),
+        **probe.summary_fields(),
     }
     write_summary_csv([summary], summary_path, columns=list(summary.keys()))
     print(f"[done] wall={wall:.1f}s  bursts={model.bursts}  "

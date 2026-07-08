@@ -458,6 +458,9 @@ int main(int Argc, char **Argv) {
   if (Args.Quick)
     H.MaxSteps = std::max<size_t>(200, H.MaxSteps / 5);
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   std::vector<std::vector<float>> X;
   std::vector<int> Y;
   std::string DatasetName = "synthetic-drift";
@@ -469,6 +472,7 @@ int main(int Argc, char **Argv) {
                static_cast<uint32_t>(Args.Seed), X, Y);
   }
   bench::Standardise(X, std::max<size_t>(256, X.size() / 10));
+  MP.EndDataset();
 
   std::cout << "[info] dataset=" << DatasetName << " InDim=" << H.InDim
             << " N=" << X.size() << " MaxSteps=" << H.MaxSteps
@@ -482,6 +486,7 @@ int main(int Argc, char **Argv) {
       FCHidden{H.InitHidden, UniformInit{SeedBase + 1, Limit}},
       FCHidden{H.InitHidden, UniformInit{SeedBase + 2, Limit}},
       FCOut{H.NumClasses, UniformInit{SeedBase + 3, Limit}, MarkOutput{}}));
+  MP.EndWeights();
   // Stage runtime params into the managed GlobalState (read by the policies).
   N->Global().Lr = H.Lr;
   N->Global().AddConnSeed = static_cast<uint64_t>(Args.Seed) * 1000ull + 17ull;
@@ -533,9 +538,10 @@ int main(int Argc, char **Argv) {
     Timer.MarkUpdate();
     N->DoPruneUnits();
     N->DoPruneConnections();
+    Timer.MarkPrune();
     N->DoAddUnits();
     N->DoAddConnections();
-    Timer.MarkStructural();
+    Timer.MarkGrow();
     N->DoResetGlobalState();
     Timer.MarkReset();
     Timer.StepDone();
@@ -627,6 +633,7 @@ int main(int Argc, char **Argv) {
   S.Set("jaccard_max", static_cast<double>(JMax));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s bursts=" << Bursts

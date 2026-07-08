@@ -89,7 +89,9 @@ def main() -> None:
         cols = ["workload", "wall_seconds", "test_mse", "n_units", "seed",
                 "step_count", "step_ns_mean", "forward_ns_mean",
                 "loss_ns_mean", "backward_ns_mean", "update_ns_mean",
-                "structural_ns_mean", "reset_ns_mean", "other_ns_mean"]
+                "prune_ns_mean", "grow_ns_mean", "reset_ns_mean",
+                "other_ns_mean",
+                "mem_overhead_kb", "mem_dataset_kb", "mem_weights_kb"]
         with dst.open("w", newline="") as f:
             w = csv.writer(f)
             w.writerow(cols)
@@ -97,8 +99,11 @@ def main() -> None:
                         row.get("reservoir", "0"), args.seed,
                         n_steps, round(step_ns_mean, 3),
                         round(fwd_mean, 3), 0.0,
-                        round(bwd_mean, 3), 0.0, 0.0, 0.0,
-                        round(other_mean, 3)])
+                        round(bwd_mean, 3), 0.0, 0.0, 0.0, 0.0,
+                        round(other_mean, 3),
+                        row.get("mem_overhead_kb", ""),
+                        row.get("mem_dataset_kb", ""),
+                        row.get("mem_weights_kb", "")])
         print(f"[esn-sentinel] wrote {dst}")
     else:
         with dst.open("w", newline="") as f:

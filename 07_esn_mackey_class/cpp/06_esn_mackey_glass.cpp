@@ -29,6 +29,8 @@
 //   <out>/timing.csv       single "epoch" row with the BLAS-phase totals
 //   <out>/summary.csv      headline row with the same shape as plastix's
 
+#include "cpp/common.hpp"
+
 #include <cblas.h>
 #include <lapacke.h>
 
@@ -283,6 +285,14 @@ int main(int Argc, char **Argv) {
   // regardless of the value.  bench_compare.py records this as epochs=1.
   std::string SeriesPath = (Argc > 3) ? Argv[3] : "";
 
+  // Memory-milestone probe. 07 writes summary.csv manually (no
+  // bench::SummaryWriter), so rather than MP.WriteSummary(S) we capture the
+  // same VmRSS milestones via bench::ReadVmRssKb() and fold the three deltas
+  // into the manual summary.csv header/row below.
+  long long MemOverheadKb = bench::ReadVmRssKb();
+  long long MemCursorKb = MemOverheadKb;
+  long long MemDatasetKb = 0, MemWeightsKb = 0;
+
   std::cout << "raw-C++/OpenBLAS ESN on Mackey-Glass\n";
   std::cout << "=====================================\n";
   std::cout << "units=" << Reservoir << "  sr=" << SpectralRadius
@@ -303,6 +313,7 @@ int main(int Argc, char **Argv) {
                                   ? MackeyGlass(SeriesLenDefault, MGTau, Seed)
                                   : LoadSeriesCsv(SeriesPath);
   NormalizeInPlace(Series);
+  { long long R = bench::ReadVmRssKb(); MemDatasetKb += R - MemCursorKb; MemCursorKb = R; }
   int NTrainAll = static_cast<int>(Series.size() * TrainFrac);
   if (NTrainAll + 1 >= static_cast<int>(Series.size())) {
     std::cerr << "series too short\n";
@@ -310,6 +321,7 @@ int main(int Argc, char **Argv) {
   }
 
   ESN Net(Reservoir, SpectralRadius, Seed);
+  { long long R = bench::ReadVmRssKb(); MemWeightsKb += R - MemCursorKb; MemCursorKb = R; }
 
   // ---- Warmup (no learning, no state recording) --------------------------
   auto T0 = Clock::now();
@@ -405,11 +417,13 @@ int main(int Argc, char **Argv) {
     std::ofstream Mcsv(OutDir + "/summary.csv");
     Mcsv << "framework,units,sr,leak,lr,epochs,n_train_steps,test_rmse,"
             "test_r2,train_wall_ns,forward_ns,loss_ns,update_ns,eval_ns,"
-            "inference_ns\n";
+            "inference_ns,mem_overhead_kb,mem_dataset_kb,mem_weights_kb\n";
     Mcsv << "raw_cpp_blas," << Reservoir << "," << SpectralRadius << ","
          << LeakRate << "," << Ridge << ",1," << TrainRows << "," << M.Rmse
          << "," << M.R2 << "," << (WarmupNs + ForwardTrainNs + FitNs) << ","
-         << ForwardTrainNs << ",0," << FitNs << ",0," << InferenceNs << "\n";
+         << ForwardTrainNs << ",0," << FitNs << ",0," << InferenceNs << ","
+         << MemOverheadKb << "," << std::max<long long>(0, MemDatasetKb) << ","
+         << std::max<long long>(0, MemWeightsKb) << "\n";
     Mcsv.close();
 
     std::cout << "[done] wrote " << OutDir

@@ -44,6 +44,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common/pytorch"))
 from common import (  # noqa: E402
+    MemoryProbe,
     PhaseTimer,
     StructuralLog,
     add_common_args,
@@ -232,6 +233,9 @@ def stream(args) -> dict:
     rng = np.random.default_rng(args.seed)
     device = resolve_device(args.device)
 
+    probe = MemoryProbe()
+    probe.start()
+
     if args.synthetic:
         Xnp, ynp = synth_slow_drift(n=args.max_steps * args.batch + 5000,
                                     dim=25, seed=args.seed)
@@ -264,9 +268,11 @@ def stream(args) -> dict:
     n_train = int(0.85 * len(X))
     X_test = X[n_train:]
     y_test = y[n_train:]
+    probe.end_dataset()
 
     model = SplitMLP(in_dim, 1, hidden=args.init_hidden, device=device).to(device)
     opt = torch.optim.SGD(model.parameters(), lr=args.lr)
+    probe.end_weights()
     act_stats = ActivationStats(model.hidden, window=args.var_window,
                                 device=device)
 
@@ -371,6 +377,7 @@ def stream(args) -> dict:
                                               for r in log.records])), 6),
         "seed": args.seed,
         **timer.summary_fields(wall),
+        **probe.summary_fields(),
     }
     write_summary_csv([summary], summary_path, columns=list(summary.keys()))
     print(f"[done] wall={wall:.1f}s  splits={model.splits}  "

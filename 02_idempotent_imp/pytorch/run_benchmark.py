@@ -47,6 +47,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common/pytorch"))
 from common import (  # noqa: E402
+    MemoryProbe,
     PhaseTimer,
     StructuralLog,
     add_common_args,
@@ -258,6 +259,9 @@ def run(args) -> dict:
     np.random.seed(args.seed)
     device = resolve_device(args.device)
 
+    probe = MemoryProbe()
+    probe.start()
+
     Xtr, ytr, Xte, yte, n_classes = load_data(args)
     print(f"[info] device={device}  in_dim={Xtr.shape[1]}  classes={n_classes}  "
           f"train={Xtr.shape[0]}  test={Xte.shape[0]}")
@@ -267,6 +271,7 @@ def run(args) -> dict:
         TensorDataset(Xtr, ytr),
         batch_size=args.batch, shuffle=True, drop_last=False,
     )
+    probe.end_dataset()
 
     model = WideMLP(Xtr.shape[1], n_classes,
                     hidden=args.hidden, depth=args.depth).to(device)
@@ -275,6 +280,7 @@ def run(args) -> dict:
     # SGD (no momentum) — matches Plastix's plain per-connection SGD.
     # weight_decay is dropped because Plastix's UpdateConn doesn't apply it.
     opt = torch.optim.SGD(model.parameters(), lr=args.lr)
+    probe.end_weights()
 
     hist_path, summary_path, plot_path = output_paths(args, "idempotent_imp")
     log = StructuralLog(hist_path)
@@ -353,6 +359,7 @@ def run(args) -> dict:
         "fixed_point_reached": int(round_logs[-1]["killed"] == 0) if round_logs else 0,
         "seed": args.seed,
         **timer.summary_fields(wall),
+        **probe.summary_fields(),
     }
     write_summary_csv([summary], summary_path, columns=list(summary.keys()))
     print(f"[done] wall={wall:.1f}s  rounds={final['round']}  "

@@ -177,6 +177,9 @@ int main(int Argc, char **Argv) {
     LogEvery = std::min<size_t>(LogEvery, 100);
   }
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   auto Path = ResolveDataset(Args);
   if (Path.empty()) {
     std::cerr << "[err] audio-prediction dataset.bin not found.\n";
@@ -213,6 +216,7 @@ int main(int Argc, char **Argv) {
       ActiveOff[T + 1] = static_cast<int>(Active.size());
     }
   }
+  MP.EndDataset();
 
   // Device state — everything resident on the GPU for the whole run.
   float *dW = nullptr, *dE = nullptr, *dX = nullptr, *dV = nullptr;
@@ -242,6 +246,7 @@ int main(int Argc, char **Argv) {
     CUDA_CHECK(cudaMemcpy(dPacked, HostPacked.data(), HostPacked.size(),
                           cudaMemcpyHostToDevice));
   }
+  MP.EndWeights();
 
   cublasHandle_t Bl;
   CUBLAS_CHECK(cublasCreate(&Bl));
@@ -367,6 +372,7 @@ int main(int Argc, char **Argv) {
   S.Set("n_edges", static_cast<int>(D));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  test_mse=" << TestMse

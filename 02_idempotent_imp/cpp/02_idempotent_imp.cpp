@@ -328,6 +328,9 @@ static void TrainEpochs(WideMLP &M, const Dataset &D, size_t Epochs,
 int main(int Argc, char **Argv) {
   auto Args = bench::CliArgs::Parse(Argc, Argv);
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   HP H;
   H.InLen = static_cast<size_t>(Args.GetInt("length", H.InLen));
   H.NumClasses = static_cast<size_t>(Args.GetInt("n-classes", H.NumClasses));
@@ -355,6 +358,7 @@ int main(int Argc, char **Argv) {
                H.Snr, static_cast<uint32_t>(Args.Seed + 1000));
   NormaliseInstance(Train);
   NormaliseInstance(Test);
+  MP.EndDataset();
 
   std::cout << "[info] InLen=" << H.InLen << " Classes=" << H.NumClasses
             << " Hidden=" << H.Hidden << " Depth=" << H.Depth
@@ -363,6 +367,7 @@ int main(int Argc, char **Argv) {
   std::mt19937 InitRng(static_cast<uint32_t>(Args.Seed) * 1000u + 11u);
   WideMLP M;
   M.Init(H.InLen, H.NumClasses, H.Hidden, H.Depth, InitRng);
+  MP.EndWeights();
 
   auto [HistPath, SummaryPath, LogPath] =
       bench::OutputPaths(Args, "idempotent_imp");
@@ -448,6 +453,7 @@ int main(int Argc, char **Argv) {
   S.Set("fixed_point_reached", static_cast<int>(FixedPoint));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  rounds=" << FinalRound

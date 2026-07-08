@@ -350,6 +350,9 @@ int main(int Argc, char **Argv) {
     H.Epochs = std::max<size_t>(1, H.Epochs / 4);
   }
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   auto Raw = LoadEtth1(Args.DataDir, Args.Synthetic,
                        static_cast<uint32_t>(Args.Seed));
   // The PyTorch reference standardises against the *first 70%* of the
@@ -372,6 +375,7 @@ int main(int Argc, char **Argv) {
   float Limit = std::sqrt(6.0f / static_cast<float>(InDim + H.Hidden));
   uint64_t SeedBase = static_cast<uint64_t>(Args.Seed) * 1000ull + 7ull;
   auto N = BuildNetwork(InDim, OutDim, H, SeedBase, Limit);
+  MP.EndWeights();
   // Stage the learning rate into the managed GlobalState; the UpdateConn
   // policy reads it on host or device through its Globals handle.
   N->Global().Lr = H.Lr;
@@ -382,6 +386,7 @@ int main(int Argc, char **Argv) {
                                       D.Y.begin() + NTr + NVa);
   std::vector<std::vector<float>> Xte(D.X.begin() + NTr + NVa, D.X.end());
   std::vector<std::vector<float>> Yte(D.Y.begin() + NTr + NVa, D.Y.end());
+  MP.EndDataset();
 
   auto [HistPath, SummaryPath, LogPath] =
       bench::OutputPaths(Args, "static_etth1");
@@ -474,6 +479,7 @@ int main(int Argc, char **Argv) {
   S.Set("jaccard_max", static_cast<double>(JMax));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  test_mse=" << TeMse << "\n";

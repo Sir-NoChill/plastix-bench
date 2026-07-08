@@ -294,6 +294,9 @@ static double EvalMse(StaticMLP &M, const std::vector<float> &X,
 int main(int Argc, char **Argv) {
   auto Args = bench::CliArgs::Parse(Argc, Argv);
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   HP H;
   H.InLen = static_cast<size_t>(Args.GetInt("in-len", H.InLen));
   H.OutLen = static_cast<size_t>(Args.GetInt("out-len", H.OutLen));
@@ -311,6 +314,7 @@ int main(int Argc, char **Argv) {
                        static_cast<uint32_t>(Args.Seed));
   StandardisePerChannel(Raw, std::max<size_t>(64, (Raw.T * 7) / 10));
   auto D = Window(Raw, H.InLen, H.OutLen);
+  MP.EndDataset();
   size_t InDim = D.InDim;
   size_t OutDim = D.OutDim;
   size_t NTotal = D.NRows;
@@ -330,6 +334,7 @@ int main(int Argc, char **Argv) {
   std::mt19937 InitRng(static_cast<uint32_t>(Args.Seed) * 1000u + 7u);
   StaticMLP M;
   M.Init(InDim, OutDim, H.Hidden, H.Depth, InitRng);
+  MP.EndWeights();
 
   auto [HistPath, SummaryPath, LogPath] =
       bench::OutputPaths(Args, "static_etth1");
@@ -451,6 +456,7 @@ int main(int Argc, char **Argv) {
   S.Set("jaccard_max", static_cast<double>(JMax));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  test_mse=" << TeMse

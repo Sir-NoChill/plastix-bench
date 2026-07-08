@@ -291,6 +291,9 @@ int main(int Argc, char **Argv) {
     H.LogEvery = std::min<size_t>(H.LogEvery, 200);
   }
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   auto TopoPath = ResolveTopology(Args);
   if (TopoPath.empty()) {
     std::cerr << "[err] topology.bin not found (looked in --data-dir and "
@@ -303,6 +306,7 @@ int main(int Argc, char **Argv) {
     std::cerr << "[err] failed to read " << TopoPath << "\n";
     return 2;
   }
+  MP.EndDataset();
 
   size_t N = std::min<size_t>(H.MaxSteps, Topo.NSteps);
   size_t RecW = static_cast<size_t>(Topo.NIn) + 1;
@@ -328,6 +332,7 @@ int main(int Argc, char **Argv) {
   LiveEdges.reserve(Topo.NEdges + 4096);
   for (size_t C = 0; C < CA.Size(); ++C)
     LiveEdges.push_back(C);
+  MP.EndWeights();
 
   Lcg Rng(0x9E3779B97F4A7C15ull);
 
@@ -428,7 +433,7 @@ int main(int Argc, char **Argv) {
         LiveEdges.pop_back();
       }
     }
-    Timer.MarkStructural();
+    Timer.MarkPrune(); // bench only removes edges; no growth phase
     // Capture delta before ResetGlobal clears it.
     float Delta = Network.Global().Delta;
     Network.DoResetGlobalState();
@@ -483,6 +488,7 @@ int main(int Argc, char **Argv) {
   S.Set("n_edges", static_cast<int>(bench::LiveEdgeCount(CA)));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  test_mse=" << TestMse

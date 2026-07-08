@@ -670,6 +670,9 @@ int main(int Argc, char **Argv) {
     H.ValEvery = std::max<size_t>(1, H.ValEvery / 2);
   }
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   Dataset D;
   std::string DatasetName;
   if (Args.Synthetic) {
@@ -690,6 +693,7 @@ int main(int Argc, char **Argv) {
   size_t Cut = std::max<size_t>(static_cast<size_t>(0.1 * D.N), 512);
   StandardiseFeatures(D, Cut);
   StandardiseTarget(D, Cut);
+  MP.EndDataset();
 
   std::cout << "[info] cuda continuous-small  in_dim=" << D.D
             << " data=" << DatasetName << " N=" << D.N
@@ -701,6 +705,7 @@ int main(int Argc, char **Argv) {
   std::mt19937 InitRng(static_cast<uint32_t>(Args.Seed) * 1000u + 17u);
   SplitMLP M;
   M.Init(D.D, 1, H.InitHidden, H.MaxHidden, H.Batch, InitRng, Bl);
+  MP.EndWeights();
   ActStats Stats(H.VarWindow, H.MaxHidden);
 
   auto [HistPath, SummaryPath, LogPath] =
@@ -874,6 +879,7 @@ int main(int Argc, char **Argv) {
   S.Set("n_units", static_cast<int>(M.UnitCount()));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  splits=" << M.Splits

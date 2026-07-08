@@ -118,6 +118,8 @@ float ImprintingLearner::step(std::span<const std::uint8_t> input, float reward)
     // 5. Remove idle, decayed, unreferenced features (before generation, so
     //    features spawned this step are not immediately culled).
     removeFeatures();
+    // Prune phase ends here: tenure + remove are the shrink half of structural.
+    auto t_prune = Clk::now();
 
     // 6. Generate new features (gated on phi_{t-1} and the tau budget).
     generateFeatures();
@@ -126,14 +128,18 @@ float ImprintingLearner::step(std::span<const std::uint8_t> input, float reward)
     //    next step's generation gate can read phi_t as phi_{t-1}.
     const std::span<const std::uint8_t> a = arena_.activations();
     prev_activation_.assign(a.begin(), a.end());
-    auto t_structural = Clk::now();
+    auto t_grow = Clk::now();
 
     profile_.forward.add(static_cast<double>(
         std::chrono::duration_cast<Ns>(t_forward - t0).count()));
     profile_.backward.add(static_cast<double>(
         std::chrono::duration_cast<Ns>(t_backward - t_forward).count()));
-    profile_.structural.add(static_cast<double>(
-        std::chrono::duration_cast<Ns>(t_structural - t_backward).count()));
+    // Split the old `structural` span: prune = tenure+remove, grow =
+    // generate+snapshot.
+    profile_.prune.add(static_cast<double>(
+        std::chrono::duration_cast<Ns>(t_prune - t_backward).count()));
+    profile_.grow.add(static_cast<double>(
+        std::chrono::duration_cast<Ns>(t_grow - t_prune).count()));
     profile_.step_count += 1;
 
     return prediction;
