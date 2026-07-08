@@ -74,7 +74,9 @@ struct HP {
   float FeedbackScale = 1.0f; // scale of random-feedback weights B
   size_t MaxTrainRows = 0;    // 0 = no cap
   size_t MaxEvalRows = 0;     // 0 = full val/test
-  size_t EvalEvery = 1;       // epochs between evaluations
+  size_t EvalEvery = 10;      // epochs between full-test evals (final metric
+                              // is computed at the end regardless; larger =
+                              // far cheaper on the 2264-row SHD test set)
 };
 
 // --- per-unit and per-conn field tags --------------------------------------

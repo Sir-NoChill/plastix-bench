@@ -94,7 +94,8 @@ struct HP {
   float WMax = 5.0f;
   size_t MaxTrainRows = 0;     // 0 = no cap
   size_t MaxEvalRows = 0;
-  size_t EvalEvery = 1;
+  size_t EvalEvery = 10;       // epochs between full-test evals (final metric
+                               // computed at the end regardless)
 };
 
 // ---------------------------------------------------------------------------
