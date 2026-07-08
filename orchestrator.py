@@ -15,7 +15,7 @@ results into a single `runs.csv`.
 
 Each per-bench `summary.csv` carries:
   * headline numbers: workload, wall_seconds, test_*, n_units, n_edges
-  * per-phase ns/step (forward/loss/backward/update/structural/reset),
+  * per-phase ns/step (forward/loss/backward/update/prune/grow/reset),
     each with mean **and standard deviation** across all optimisation
     steps. See common/{cpp,plastix,pytorch}/common.{hpp,py} for the
     shared `PhaseTimer` that produces them.
@@ -84,20 +84,27 @@ PLOTS_DIR = HERE / "_plots"
 
 # Impls in canonical order — the orchestrator presents them this way in
 # tables and plot legends.
-IMPL_ORDER = ("pytorch", "plastix", "cpp", "cuda")
+IMPL_ORDER = ("pytorch", "plastix", "cpp", "cuda", "jax", "snn", "norse")
 IMPL_COLOUR = {
     "pytorch": "#d35a5a",
     "plastix": "#1f9d55",
     "cpp":     "#3a7bd5",
     "cuda":    "#9b1fd6",
+    "jax":     "#e08b1f",
+    "snn":     "#7b4fd6",
+    "norse":   "#d64f9b",
 }
 IMPL_LABEL = {
     "pytorch": "PyTorch",
     "plastix": "Plastix",
     "cpp":     "C++ (OpenBLAS)",
     "cuda":    "CUDA (cuBLAS)",
+    "jax":     "JAX",
+    "snn":     "snnTorch (SNN)",
+    "norse":   "Norse (SNN)",
 }
-IMPL_MARKER = {"pytorch": "s", "plastix": "o", "cpp": "D", "cuda": "*"}
+IMPL_MARKER = {"pytorch": "s", "plastix": "o", "cpp": "D", "cuda": "*",
+               "jax": "^", "snn": "v", "norse": "P"}
 
 
 @dataclass
@@ -107,13 +114,23 @@ class Sentinel:
     path: Path                # the run_benchmark.py file
 
 
-_NON_BENCH_DIRS = {"common", "cmake"}
+# `baselines` holds the alt-framework comparison harnesses (run via
+# run_baselines.py), and `11_scaling_imprint` is driven by the scaling.py sweep —
+# neither belongs in the main per-bench suite / paper tables.
+_NON_BENCH_DIRS = {"common", "cmake", "baselines", "11_scaling_imprint"}
+
+# Benches discovered normally (so `list` and `run --bench <name>` still reach
+# them) but skipped by a no-filter `run`. 01_static_etth1 is a dense-MLP control
+# whose comparison is muddied by the plastix impl running batch-1 online SGD
+# (~64x the weight updates of every other framework), so it's excluded from the
+# default sweep. Pass `--bench 01_static_etth1` to run it explicitly.
+_DEFAULT_RUN_EXCLUDE = {"01_static_etth1"}
 
 
 def discover(root: Path = HERE) -> list[Sentinel]:
     """Walk the suite root and find every <bench>/<impl>/run_benchmark.py.
     Skips dirs whose name starts with `_` plus the shared `common`/`cmake`
-    trees (metadata / cache / shared utilities)."""
+    trees and the non-suite harness dirs (metadata / cache / shared utilities)."""
     out: list[Sentinel] = []
     for bench_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         if bench_dir.name.startswith("_") or bench_dir.name in _NON_BENCH_DIRS:
@@ -151,9 +168,17 @@ PHASE_KEYS = (
     "loss_ns_mean", "loss_ns_std",
     "backward_ns_mean", "backward_ns_std",
     "update_ns_mean", "update_ns_std",
-    "structural_ns_mean", "structural_ns_std",
+    "prune_ns_mean", "prune_ns_std",
+    "grow_ns_mean", "grow_ns_std",
     "reset_ns_mean", "reset_ns_std",
     "other_ns_mean",
+)
+
+# Per-bench RSS milestone breakdown (MemoryProbe). Hoisted alongside PHASE_KEYS
+# so memory_table.py can read the categories from runs.csv. Keep in lockstep
+# with MEMORY_COLUMNS in common/pytorch/common.py.
+MEM_KEYS = (
+    "mem_overhead_kb", "mem_dataset_kb", "mem_weights_kb",
 )
 
 
@@ -232,28 +257,52 @@ def _walk_descendants(root_pid: int) -> set[int]:
     return out
 
 
+def _gpu_vram_kb(pids: set[int]) -> int:
+    """Sum of GPU VRAM (kB) used by the given PIDs, via nvidia-smi's per-process
+    compute-apps query. 0 if no GPU / nvidia-smi absent / no matching process."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,used_memory",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return 0
+    total_mib = 0
+    for line in out.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 2 and parts[0].isdigit() and int(parts[0]) in pids:
+            try:
+                total_mib += int(parts[1])
+            except ValueError:
+                pass
+    return total_mib * 1024
+
+
 def _poll_memory(pid: int, poll_interval_s: float = 0.05):
     """Background-thread helper. At each tick, sums VmRSS over the live
     descendant set and records both the maximum observation (peak) and the
     running mean (average). VmRSS-based polling is what we want for "average
     memory" — VmHWM is a monotonic high-water-mark per-process and would
-    bias the mean upward, especially for short-lived children.
+    bias the mean upward, especially for short-lived children. GPU VRAM is
+    polled on a coarser cadence (nvidia-smi is slow) and tracked as a peak.
 
     Returns (state, stop_event, thread). state has keys:
-        peak_kb:  max(sum over descendants of VmRSS), in kB
-        mean_kb:  arithmetic mean across polled timestamps, in kB
-        samples:  number of poll ticks
+        peak_kb:      max(sum over descendants of VmRSS), in kB
+        mean_kb:      arithmetic mean across polled timestamps, in kB
+        samples:      number of poll ticks
+        peak_vram_kb: max(sum over descendants of GPU VRAM), in kB (0 on CPU)
     Notes:
       - Polling stops when stop.set() is called.
       - kB matches /proc convention; divide by 1024 for MiB.
     """
     import threading
-    state = {"peak_kb": 0, "mean_kb": 0.0, "samples": 0}
+    state = {"peak_kb": 0, "mean_kb": 0.0, "samples": 0, "peak_vram_kb": 0}
     stop = threading.Event()
 
     def loop():
         sum_kb = 0
         n = 0
+        vram_every = max(1, int(0.5 / poll_interval_s))  # poll VRAM ~every 0.5s
         while not stop.is_set():
             try:
                 pids = _walk_descendants(pid)
@@ -269,6 +318,10 @@ def _poll_memory(pid: int, poll_interval_s: float = 0.05):
             # Update mean live so the caller can read partials if needed.
             state["mean_kb"] = sum_kb / max(n, 1)
             state["samples"] = n
+            if n % vram_every == 1:
+                vram = _gpu_vram_kb(pids)
+                if vram > state["peak_vram_kb"]:
+                    state["peak_vram_kb"] = vram
             stop.wait(poll_interval_s)
 
     t = threading.Thread(target=loop, daemon=True)
@@ -305,7 +358,7 @@ def run_one(s: Sentinel, *, tag: str, build_dir: Path,
         "--out-dir", str(out_dir),
         "--seed", "0",
     ]
-    if s.impl != "pytorch":
+    if s.impl not in ("pytorch", "jax", "snn", "norse"):
         base_cmd += ["--build-dir", str(build_dir)]
         # The C++ binaries default DataDir to a relative "data" (see
         # common/{plastix,cpp}/common.hpp). Run from the repo root that
@@ -315,12 +368,24 @@ def run_one(s: Sentinel, *, tag: str, build_dir: Path,
         # without (08) hard-fail. Point every C++ impl at the real data root.
         # (The PyTorch sentinels resolve this path themselves via common.py.)
         base_cmd += ["--data-dir", str(HERE / "common" / "pytorch" / "data")]
-    # `--device cpu` is only understood by the PyTorch impls. Passing it to
-    # C++ binaries via the sentinel would surface in their CliArgs as an
-    # unknown key + non-zero exit; gate on the impl.
-    if s.impl == "pytorch":
+    # `--device cpu` is only understood by the Python impls (PyTorch/JAX/SNN).
+    # Passing it to C++ binaries via the sentinel would surface in their
+    # CliArgs as an unknown key + non-zero exit; gate on the impl.
+    if s.impl in ("pytorch", "jax", "snn", "norse"):
         base_cmd += ["--device", device, "--no-plot"]
     base_cmd += extras
+
+    # JAX picks its backend from JAX_PLATFORMS, not our --device flag, so pin it
+    # explicitly: a cpu-tagged pass must run jax on CPU, a gpu pass on the GPU.
+    extra_env = {}
+    if s.impl == "jax":
+        on_gpu = device in ("cuda", "gpu")
+        extra_env["JAX_PLATFORMS"] = "cuda" if on_gpu else "cpu"
+        if on_gpu:
+            # By default XLA preallocates ~75% of VRAM into a pool, which would
+            # make the polled per-process VRAM meaningless (~all of it). Disable
+            # so peak_vram_kb reflects actual usage.
+            extra_env["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
     if not quiet:
         print(f"  [run] {s.bench}/{s.impl}   {' '.join(shlex.quote(c) for c in base_cmd)}")
@@ -331,7 +396,8 @@ def run_one(s: Sentinel, *, tag: str, build_dir: Path,
         env={**os.environ,
              "OMP_NUM_THREADS": "1",
              "OPENBLAS_NUM_THREADS": "1",
-             "MKL_NUM_THREADS": "1"})
+             "MKL_NUM_THREADS": "1",
+             **extra_env})
     mem_state, stop, poller = _poll_memory(proc.pid)
     # Hard per-benchmark wall-clock cap: kill any run that exceeds it so a
     # single slow (bench, impl) can't stall the whole sweep, and the rest still
@@ -356,6 +422,7 @@ def run_one(s: Sentinel, *, tag: str, build_dir: Path,
     peak_rss_kb = mem_state["peak_kb"]
     mean_rss_kb = mem_state["mean_kb"]
     mem_samples = mem_state["samples"]
+    peak_vram_kb = mem_state["peak_vram_kb"]
 
     # The summary CSV lives at `<out-dir>/<workload-name>_<tag>.summary.csv`
     # where <workload-name> varies by impl (`ccwc`, `ccwc_ncp`, `snn_shd`...).
@@ -370,7 +437,7 @@ def run_one(s: Sentinel, *, tag: str, build_dir: Path,
             "wall_seconds": float("nan"), "metric": float("nan"),
             "metric_kind": "?", "peak_rss_kb": peak_rss_kb,
             "mean_rss_kb": round(mean_rss_kb, 1),
-            "mem_samples": mem_samples,
+            "mem_samples": mem_samples, "peak_vram_kb": peak_vram_kb,
             "subproc_wall_s": wall, "params_or_edges": 0,
             "summary_csv": "",
         }
@@ -400,6 +467,7 @@ def run_one(s: Sentinel, *, tag: str, build_dir: Path,
         "peak_rss_kb": peak_rss_kb,
         "mean_rss_kb": round(mean_rss_kb, 1),
         "mem_samples": mem_samples,
+        "peak_vram_kb": peak_vram_kb,
         "subproc_wall_s": wall,
         "params_or_edges": int(float(params)) if params else 0,
         "summary_csv": str(candidates[0]),
@@ -408,7 +476,7 @@ def run_one(s: Sentinel, *, tag: str, build_dir: Path,
     # in runs.csv next to wall/metric. NaN-fill the rest so a single
     # csv.DictWriter writes a stable schema across benches with and without
     # phase profiling.
-    for k in PHASE_KEYS:
+    for k in PHASE_KEYS + MEM_KEYS:
         v = summary.get(k)
         try:
             out[k] = float(v) if v is not None and v != "" else float("nan")
@@ -445,6 +513,15 @@ def _select(sentinels: list[Sentinel], bench: str | None,
 
 def cmd_run(args) -> None:
     sentinels = _select(discover(), args.bench, args.impl)
+    # A no-filter run skips the default-excluded benches (e.g. the dense-MLP
+    # control); an explicit --bench overrides the exclusion.
+    if not args.bench:
+        skipped = sorted({s.bench for s in sentinels} & _DEFAULT_RUN_EXCLUDE)
+        if skipped:
+            sentinels = [s for s in sentinels
+                         if s.bench not in _DEFAULT_RUN_EXCLUDE]
+            print(f"[orch] skipping {', '.join(skipped)} in default run "
+                  f"(pass --bench <name> to include)")
     if not sentinels:
         print("[err] no sentinels matched the filter", file=sys.stderr)
         sys.exit(1)
@@ -840,7 +917,8 @@ def plot_phase_stats(runs: list[dict]) -> None:
         ("loss_ns",       "loss"),
         ("backward_ns",   "backward"),
         ("update_ns",     "update"),
-        ("structural_ns", "structural"),
+        ("prune_ns",      "prune"),
+        ("grow_ns",       "grow"),
         ("reset_ns",      "reset"),
     ]
 
@@ -918,14 +996,15 @@ def plot_phases(runs: list[dict]) -> None:
 
     PHASE_PLOT_KEYS = ("forward_ns_mean", "loss_ns_mean",
                        "backward_ns_mean", "update_ns_mean",
-                       "structural_ns_mean", "reset_ns_mean",
+                       "prune_ns_mean", "grow_ns_mean", "reset_ns_mean",
                        "other_ns_mean")
     PHASE_LABELS = {
         "forward_ns_mean":    "forward",
         "loss_ns_mean":       "loss",
         "backward_ns_mean":   "backward",
         "update_ns_mean":     "update (opt step)",
-        "structural_ns_mean": "structural (Prune+Add)",
+        "prune_ns_mean":      "prune (Prune*)",
+        "grow_ns_mean":       "grow (Add*)",
         "reset_ns_mean":      "reset",
         "other_ns_mean":      "harness / Python",
     }
@@ -934,7 +1013,8 @@ def plot_phases(runs: list[dict]) -> None:
         "loss_ns_mean":       "#8aacd6",
         "backward_ns_mean":   "#f4a261",
         "update_ns_mean":     "#f0c987",
-        "structural_ns_mean": "#e76f51",
+        "prune_ns_mean":      "#e76f51",
+        "grow_ns_mean":       "#c1440e",
         "reset_ns_mean":      "#bfbfbf",
         "other_ns_mean":      "#bdb2ff",
     }
