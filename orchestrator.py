@@ -1123,10 +1123,10 @@ def main() -> None:
     sp_run.add_argument("--device", default="cpu",
                         help="device for the pytorch impls (cpu|cuda); C++ and "
                              "plastix impls are CPU/GPU by their build dir")
-    sp_run.add_argument("--timeout", type=float, default=600.0,
+    sp_run.add_argument("--timeout", type=float, default=3600.0,
                         help="per-benchmark wall-clock cap in seconds "
-                             "(default 600 = 10 min); exceeding it kills the "
-                             "run and skips it")
+                             "(default 3600 = 1 h; the full-data SNN impls run "
+                             "~35 min); exceeding it kills the run and skips it")
     sp_run.add_argument("--quiet", action="store_true")
     sp_run.add_argument("passthrough", nargs="*",
                         help="extra args forwarded to every sentinel")
