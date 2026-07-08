@@ -34,5 +34,8 @@ __pycache__/
 /_plots*/
 /_results/
 
+# CUDA profiler outputs (profile.py: nsys .nsys-rep / nvprof .csv / .nvvp)
+/_profiles/
+
 # Python build metadata
 *.egg-info/
