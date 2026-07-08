@@ -509,6 +509,9 @@ int main(int Argc, char **Argv) {
   if (Args.Quick)
     H.MaxSteps = std::max<size_t>(600, H.MaxSteps / 5);
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   std::vector<std::vector<float>> X;
   std::vector<float> Y;
   std::string DatasetName = "synthetic-slow-drift";
@@ -521,6 +524,7 @@ int main(int Argc, char **Argv) {
   }
   bench::Standardise(X, std::max<size_t>(256, X.size() / 10));
   StandardiseY(Y, std::max<size_t>(256, Y.size() / 10));
+  MP.EndDataset();
 
   std::cout << "[info] dataset=" << DatasetName << " InDim=" << H.InDim
             << " N=" << X.size() << " MaxSteps=" << H.MaxSteps
@@ -532,6 +536,7 @@ int main(int Argc, char **Argv) {
   auto N = std::unique_ptr<Net>(new Net(
       H.InDim, FCHidden{H.InitHidden, UniformInit{SeedBase + 1, Limit}},
       FCOut{1, UniformInit{SeedBase + 2, Limit}, MarkOutput{}}));
+  MP.EndWeights();
   // Stage runtime params into the managed GlobalState (read by the policies).
   N->Global().Lr = H.Lr;
   N->Global().Alpha = H.VarEmaAlpha;
@@ -635,9 +640,10 @@ int main(int Argc, char **Argv) {
     Timer.MarkUpdate();
     N->DoPruneUnits();
     N->DoPruneConnections();
+    Timer.MarkPrune();
     N->DoAddUnits();
     N->DoAddConnections();
-    Timer.MarkStructural();
+    Timer.MarkGrow();
     N->DoResetGlobalState();
     Timer.MarkReset();
     Timer.StepDone();
@@ -739,6 +745,7 @@ int main(int Argc, char **Argv) {
                             std::max<size_t>(Log.Records().size(), 1));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s splits=" << Splits

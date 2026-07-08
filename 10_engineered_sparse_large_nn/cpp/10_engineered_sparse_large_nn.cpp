@@ -133,6 +133,9 @@ static std::filesystem::path ResolveTopology(const bench::CliArgs &Args) {
 int main(int Argc, char **Argv) {
   auto Args = bench::CliArgs::Parse(Argc, Argv);
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   size_t MaxSteps = static_cast<size_t>(Args.GetInt("max-steps", 0));  // 0 = all
   size_t LogEvery = static_cast<size_t>(Args.GetInt("log-every", 1000));
   if (Args.Quick) {
@@ -154,6 +157,7 @@ int main(int Argc, char **Argv) {
     std::cerr << "[err] failed to load topology " << TopoPath << "\n";
     return 2;
   }
+  MP.EndDataset();
 
   size_t N = Topo.NSteps;
   if (MaxSteps != 0)
@@ -196,6 +200,7 @@ int main(int Argc, char **Argv) {
     MaxHiddenLayer = 2;
 
   Lcg Rng;
+  MP.EndWeights();
 
   // ---- output scaffolding -------------------------------------------------
   auto [HistPath, SummaryPath, LogPath] =
@@ -318,7 +323,7 @@ int main(int Argc, char **Argv) {
         LiveIdx.erase(LiveIdx.begin() + Pick);
       }
     }
-    PT.MarkStructural();
+    PT.MarkPrune(); // bench only removes edges; no growth phase
     PT.StepDone();
 
     // --- per-epoch structural log ---
@@ -371,6 +376,7 @@ int main(int Argc, char **Argv) {
   S.Set("backward_ns_std", 0.0);
   S.Set("reset_ns_mean", 0.0);
   S.Set("reset_ns_std", 0.0);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  test_mse=" << TestMse

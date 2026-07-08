@@ -416,6 +416,9 @@ static double EvalAccOnSlice(GrowableMLP &M, const Dataset &D, size_t Start,
 int main(int Argc, char **Argv) {
   auto Args = bench::CliArgs::Parse(Argc, Argv);
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   HP H;
   H.InitHidden = static_cast<size_t>(Args.GetInt("init-hidden", H.InitHidden));
   H.MaxHidden = static_cast<size_t>(Args.GetInt("max-hidden", H.MaxHidden));
@@ -457,6 +460,7 @@ int main(int Argc, char **Argv) {
   }
   size_t Cut = std::max<size_t>(static_cast<size_t>(0.1 * D.N), 256);
   StandardiseFeatures(D, Cut);
+  MP.EndDataset();
 
   std::cout << "[info] in_dim=" << D.D << " classes=" << D.NumClasses
             << " data=" << DatasetName << " N=" << D.N
@@ -466,6 +470,7 @@ int main(int Argc, char **Argv) {
   std::mt19937 InitRng(static_cast<uint32_t>(Args.Seed) * 1000u + 13u);
   GrowableMLP M;
   M.Init(D.D, D.NumClasses, H.InitHidden, H.MaxHidden, InitRng);
+  MP.EndWeights();
 
   auto [HistPath, SummaryPath, LogPath] =
       bench::OutputPaths(Args, "bursty_elec2");
@@ -592,6 +597,7 @@ int main(int Argc, char **Argv) {
   S.Set("jaccard_max", static_cast<double>(JMax));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  bursts=" << M.Bursts

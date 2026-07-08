@@ -129,7 +129,8 @@ public:
     struct Profile {
         PhaseAcc forward;        // arena.step + active-id collection
         PhaseAcc backward;       // SwiftTD weight update (TD δ + step)
-        PhaseAcc structural;     // tenure + remove + generate + snapshot
+        PhaseAcc prune;          // tenure policy + remove idle/decayed features
+        PhaseAcc grow;           // generate new features + activation snapshot
         std::uint64_t step_count = 0;
     };
     const Profile& profile() const noexcept { return profile_; }

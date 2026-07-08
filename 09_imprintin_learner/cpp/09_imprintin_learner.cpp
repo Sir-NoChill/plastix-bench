@@ -83,6 +83,9 @@ static std::vector<float> ComputeReturns(const std::vector<int> &Rewards,
 int main(int Argc, char **Argv) {
   auto Args = bench::CliArgs::Parse(Argc, Argv);
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   HP H;
   H.MaxSteps = static_cast<size_t>(Args.GetInt("max-steps", H.MaxSteps));
   H.LogEvery = static_cast<size_t>(Args.GetInt("log-every", H.LogEvery));
@@ -126,6 +129,7 @@ int main(int Argc, char **Argv) {
   for (size_t T = 0; T < N; ++T)
     Rewards[T] = DS[T].Reward();
   auto Returns = ComputeReturns(Rewards, H.Gamma);
+  MP.EndDataset();
 
   il::HyperParams Hp;
   // Feature-arena capacity. Tunable for large-scale runs (e.g. the ~1M-neuron
@@ -157,6 +161,7 @@ int main(int Argc, char **Argv) {
 
   il::ImprintingLearner Learner(Hp);
   Learner.addObservations(DS.ObservationDim());
+  MP.EndWeights();
 
   auto [HistPath, SummaryPath, LogPath] =
       bench::OutputPaths(Args, "audio_imprinting");
@@ -227,11 +232,13 @@ int main(int Argc, char **Argv) {
   double FwdNsStd = Prof.forward.stddev();
   double BwdNsMean = Prof.backward.mean;
   double BwdNsStd = Prof.backward.stddev();
-  double StructNsMean = Prof.structural.mean;
-  double StructNsStd = Prof.structural.stddev();
+  double PruneNsMean = Prof.prune.mean;
+  double PruneNsStd = Prof.prune.stddev();
+  double GrowNsMean = Prof.grow.mean;
+  double GrowNsStd = Prof.grow.stddev();
   double StepNsMean = (Wall * 1e9) / static_cast<double>(Steps);
-  double OtherNsMean =
-      std::max<double>(0.0, StepNsMean - FwdNsMean - BwdNsMean - StructNsMean);
+  double OtherNsMean = std::max<double>(
+      0.0, StepNsMean - FwdNsMean - BwdNsMean - PruneNsMean - GrowNsMean);
 
   Log.Flush();
 
@@ -265,12 +272,15 @@ int main(int Argc, char **Argv) {
   S.Set("backward_ns_std", BwdNsStd);
   S.Set("update_ns_mean", 0.0);
   S.Set("update_ns_std", 0.0);
-  S.Set("structural_ns_mean", StructNsMean);
-  S.Set("structural_ns_std", StructNsStd);
+  S.Set("prune_ns_mean", PruneNsMean);
+  S.Set("prune_ns_std", PruneNsStd);
+  S.Set("grow_ns_mean", GrowNsMean);
+  S.Set("grow_ns_std", GrowNsStd);
   S.Set("reset_ns_mean", 0.0);
   S.Set("reset_ns_std", 0.0);
   S.Set("other_ns_mean", OtherNsMean);
   S.Set("seed", Args.Seed);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  test_mse=" << TestMse
@@ -278,7 +288,7 @@ int main(int Argc, char **Argv) {
             << "  final_features=" << Learner.arena().size() << "\n";
   std::cout << "[phase] step=" << StepNsMean << "ns  forward=" << FwdNsMean
             << "ns  backward=" << BwdNsMean
-            << "ns  structural=" << StructNsMean
+            << "ns  prune=" << PruneNsMean << "ns  grow=" << GrowNsMean
             << "ns  other=" << OtherNsMean << "ns  (mean per step over "
             << Steps << " steps)\n";
   std::cout << "[done] wrote " << HistPath << ", " << SummaryPath << "\n";

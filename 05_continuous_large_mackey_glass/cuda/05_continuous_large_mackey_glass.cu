@@ -745,6 +745,9 @@ int main(int Argc, char **Argv) {
     H.ValEvery = std::max<size_t>(1, H.ValEvery / 2);
   }
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   auto Series =
       MackeyGlass(H.SeriesLen, H.Tau, static_cast<uint32_t>(Args.Seed));
   double Mu = 0.0;
@@ -759,6 +762,7 @@ int main(int Argc, char **Argv) {
     V = static_cast<float>((V - Mu) / Sd);
 
   auto W = WindowSeries(Series, H.InLen, H.Horizon);
+  MP.EndDataset();
   size_t NTr = static_cast<size_t>(0.7f * W.N);
   size_t NVa = static_cast<size_t>(0.15f * W.N);
   size_t NTe = W.N - NTr - NVa;
@@ -775,6 +779,7 @@ int main(int Argc, char **Argv) {
   SparseRecurrent M;
   M.Init(H.InLen, 1, H.InitHidden, H.MaxHidden, H.Batch, H.RecurDensity,
          InitRng, Bl);
+  MP.EndWeights();
 
   auto [HistPath, SummaryPath, LogPath] =
       bench::OutputPaths(Args, "continuous_large_mg");
@@ -967,6 +972,7 @@ int main(int Argc, char **Argv) {
   S.Set("n_params", static_cast<int>(M.EdgeCount()));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  grows=" << M.Grows

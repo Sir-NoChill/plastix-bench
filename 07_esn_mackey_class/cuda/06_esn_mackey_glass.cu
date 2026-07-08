@@ -52,6 +52,8 @@
 #include <string>
 #include <vector>
 
+#include "cpp/common.hpp"  // bench::ReadVmRssKb (this bench writes its CSV manually)
+
 #define CUDA_CHECK(x)                                                          \
   do {                                                                         \
     cudaError_t e_ = (x);                                                      \
@@ -420,11 +422,15 @@ int main(int Argc, char **Argv) {
     return std::chrono::duration_cast<ns>(D).count();
   };
 
+  long long MemOverheadKb = bench::ReadVmRssKb();
+
   // ---- Data (verbatim from the cpp impl) ---------------------------------
   std::vector<float> Series = SeriesPath.empty()
                                   ? MackeyGlass(SeriesLenDefault, MGTau, Seed)
                                   : LoadSeriesCsv(SeriesPath);
   NormalizeInPlace(Series);
+  long long MemAfterData = bench::ReadVmRssKb();
+  long long MemDatasetKb = std::max<long long>(0, MemAfterData - MemOverheadKb);
   int NTrainAll = static_cast<int>(Series.size() * TrainFrac);
   if (NTrainAll + 1 >= static_cast<int>(Series.size())) {
     std::cerr << "series too short\n";
@@ -437,6 +443,8 @@ int main(int Argc, char **Argv) {
   CUSOLVER_CHECK(cusolverDnCreate(&Cs));
 
   ESN Net(Reservoir, SpectralRadius, Seed, Bl);
+  long long MemWeightsKb =
+      std::max<long long>(0, bench::ReadVmRssKb() - MemAfterData);
 
   // ---- Warmup (no learning, no state recording) --------------------------
   auto T0 = Clock::now();
@@ -535,11 +543,13 @@ int main(int Argc, char **Argv) {
     std::ofstream Mcsv(OutDir + "/summary.csv");
     Mcsv << "framework,units,sr,leak,lr,epochs,n_train_steps,test_rmse,"
             "test_r2,train_wall_ns,forward_ns,loss_ns,update_ns,eval_ns,"
-            "inference_ns\n";
+            "inference_ns,mem_overhead_kb,mem_dataset_kb,mem_weights_kb\n";
     Mcsv << "cuda_cublas_cusolver," << Reservoir << "," << SpectralRadius << ","
          << LeakRate << "," << Ridge << ",1," << TrainRows << "," << M.Rmse
          << "," << M.R2 << "," << (WarmupNs + ForwardTrainNs + FitNs) << ","
-         << ForwardTrainNs << ",0," << FitNs << ",0," << InferenceNs << "\n";
+         << ForwardTrainNs << ",0," << FitNs << ",0," << InferenceNs << ","
+         << MemOverheadKb << "," << MemDatasetKb << "," << MemWeightsKb
+         << "\n";
     Mcsv.close();
 
     std::cout << "[done] wrote " << OutDir

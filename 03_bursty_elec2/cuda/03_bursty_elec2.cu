@@ -788,6 +788,9 @@ int main(int Argc, char **Argv) {
     H.ValEvery = std::max<size_t>(1, H.ValEvery / 2);
   }
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   Dataset D;
   std::string DatasetName;
   if (Args.Synthetic) {
@@ -807,6 +810,7 @@ int main(int Argc, char **Argv) {
   }
   size_t Cut = std::max<size_t>(static_cast<size_t>(0.1 * D.N), 256);
   StandardiseFeatures(D, Cut);
+  MP.EndDataset();
 
   std::cout << "[info] cuda bursty MLP  in_dim=" << D.D
             << " classes=" << D.NumClasses << " data=" << DatasetName
@@ -823,6 +827,7 @@ int main(int Argc, char **Argv) {
   // the eval minibatch granularity stays loss-neutral against the cpp impl.
   size_t BatchCap = std::max(H.Batch, H.ValWindow);
   M.Init(D.D, D.NumClasses, H.InitHidden, H.MaxHidden, BatchCap, InitRng, Bl);
+  MP.EndWeights();
 
   auto [HistPath, SummaryPath, LogPath] =
       bench::OutputPaths(Args, "bursty_elec2");
@@ -967,6 +972,7 @@ int main(int Argc, char **Argv) {
   S.Set("n_units", static_cast<int>(M.UnitCount()));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  bursts=" << M.Bursts

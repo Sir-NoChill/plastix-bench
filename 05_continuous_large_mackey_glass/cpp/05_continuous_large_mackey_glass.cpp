@@ -417,6 +417,9 @@ static double ComputeGradNorm(const SparseRecurrent &M) {
 int main(int Argc, char **Argv) {
   auto Args = bench::CliArgs::Parse(Argc, Argv);
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   HP H;
   H.SeriesLen = static_cast<size_t>(Args.GetInt("series-len", H.SeriesLen));
   H.Tau = static_cast<size_t>(Args.GetInt("tau", H.Tau));
@@ -460,6 +463,7 @@ int main(int Argc, char **Argv) {
     V = static_cast<float>((V - Mu) / Sd);
 
   auto W = WindowSeries(Series, H.InLen, H.Horizon);
+  MP.EndDataset();
   size_t NTr = static_cast<size_t>(0.7f * W.N);
   size_t NVa = static_cast<size_t>(0.15f * W.N);
   size_t NTe = W.N - NTr - NVa;
@@ -472,6 +476,7 @@ int main(int Argc, char **Argv) {
   std::mt19937 InitRng(static_cast<uint32_t>(Args.Seed) * 1000u + 19u);
   SparseRecurrent M;
   M.Init(H.InLen, 1, H.InitHidden, H.MaxHidden, H.RecurDensity, InitRng);
+  MP.EndWeights();
 
   auto [HistPath, SummaryPath, LogPath] =
       bench::OutputPaths(Args, "continuous_large_mg");
@@ -635,6 +640,7 @@ int main(int Argc, char **Argv) {
   S.Set("jaccard_mean", JMean);
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  grows=" << M.Grows

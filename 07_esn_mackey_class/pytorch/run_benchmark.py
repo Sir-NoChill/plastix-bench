@@ -31,6 +31,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / "common/pytorch"))
 
 from common import (  # noqa: E402
+    MemoryProbe,
     StructuralLog,
     add_common_args,
     output_paths,
@@ -53,7 +54,9 @@ def build_esn(units: int, sr: float, lr: float, ridge: float, seed: int):
 def fit_and_score(units: int, sr: float, lr: float, ridge: float,
                   warmup: int, x_train: np.ndarray, y_train: np.ndarray,
                   x_test: np.ndarray, y_test: np.ndarray,
-                  seed: int) -> tuple[float, float, float, dict]:
+                  seed: int,
+                  probe: MemoryProbe | None = None
+                  ) -> tuple[float, float, float, dict]:
     """Returns (rmse, r2, wall_seconds, phase_ns).  RMSE may be inf if the
     reservoir state went non-finite (sr > 1 is allowed to misbehave).
 
@@ -63,6 +66,8 @@ def fit_and_score(units: int, sr: float, lr: float, ridge: float,
     from reservoirpy.observables import rmse as _rmse, rsquare as _r2
 
     esn = build_esn(units=units, sr=sr, lr=lr, ridge=ridge, seed=seed)
+    if probe is not None:
+        probe.end_weights()
     t0 = time.perf_counter()
     tf0 = time.perf_counter_ns()
     esn.fit(x_train, y_train, warmup=warmup)
@@ -86,6 +91,9 @@ def run(args) -> dict:
         sys.exit(f"[fatal] reservoirpy not installed ({e}); "
                  f"run `uv pip install reservoirpy`")
 
+    probe = MemoryProbe()
+    probe.start()
+
     n_timesteps = args.series_len // (4 if args.quick else 1)
     n_timesteps = max(500, n_timesteps)
     X = mackey_glass(n_timesteps=n_timesteps)
@@ -99,6 +107,7 @@ def run(args) -> dict:
     x_train, x_test, y_train, y_test = to_forecasting(
         X, forecast=args.horizon, test_size=args.test_size,
     )
+    probe.end_dataset()
     print(f"[info] series_len={n_timesteps}  horizon={args.horizon}  "
           f"train={len(x_train)}  test={len(x_test)}  "
           f"normalize={args.normalize}")
@@ -111,6 +120,7 @@ def run(args) -> dict:
         x_train=x_train, y_train=y_train,
         x_test=x_test, y_test=y_test,
         seed=args.seed,
+        probe=probe,
     )
 
     hist_path, summary_path, plot_path = output_paths(args, "esn_mg_baseline")
@@ -150,10 +160,12 @@ def run(args) -> dict:
         "backward_ns_mean": round(phase_ns["fit_ns"]
                                   / max(phase_ns["n_train_steps"], 1), 3),
         "update_ns_mean": 0.0,
-        "structural_ns_mean": 0.0,
+        "prune_ns_mean": 0.0,
+        "grow_ns_mean": 0.0,
         "reset_ns_mean": 0.0,
         "other_ns_mean": round((wall * 1e9 - phase_ns["fit_ns"])
                                / max(phase_ns["n_train_steps"], 1), 3),
+        **probe.summary_fields(),
     }
     write_summary_csv([summary], summary_path, columns=list(summary.keys()))
 

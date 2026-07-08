@@ -355,6 +355,9 @@ static double EvalMseOnSlice(SplitMLP &M, const Dataset &D, size_t Start,
 int main(int Argc, char **Argv) {
   auto Args = bench::CliArgs::Parse(Argc, Argv);
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   HP H;
   H.InitHidden = static_cast<size_t>(Args.GetInt("init-hidden", H.InitHidden));
   H.MaxHidden = static_cast<size_t>(Args.GetInt("max-hidden", H.MaxHidden));
@@ -392,6 +395,7 @@ int main(int Argc, char **Argv) {
   size_t Cut = std::max<size_t>(static_cast<size_t>(0.1 * D.N), 512);
   StandardiseFeatures(D, Cut);
   StandardiseTarget(D, Cut);
+  MP.EndDataset();
 
   std::cout << "[info] in_dim=" << D.D << " data=" << DatasetName
             << " N=" << D.N << " steps=" << H.MaxSteps
@@ -401,6 +405,7 @@ int main(int Argc, char **Argv) {
   SplitMLP M;
   M.Init(D.D, 1, H.InitHidden, H.MaxHidden, InitRng);
   ActStats Stats(H.VarWindow, H.MaxHidden);
+  MP.EndWeights();
 
   auto [HistPath, SummaryPath, LogPath] =
       bench::OutputPaths(Args, "continuous_small_appliances");
@@ -541,6 +546,7 @@ int main(int Argc, char **Argv) {
   S.Set("jaccard_mean", JMean);
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  splits=" << M.Splits

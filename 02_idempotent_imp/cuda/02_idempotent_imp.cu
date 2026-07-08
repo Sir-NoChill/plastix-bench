@@ -729,6 +729,9 @@ int main(int Argc, char **Argv) {
   // (for quick smoke runs); 0 = unlimited. Mirrors the 01/05 CUDA impls.
   size_t MaxSteps = static_cast<size_t>(Args.GetInt("max-steps", 0));
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   auto Train = SynthUcr(H.NPerClass, H.NumClasses, H.InLen, H.Snr,
                         static_cast<uint32_t>(Args.Seed));
   auto Test =
@@ -736,6 +739,7 @@ int main(int Argc, char **Argv) {
                H.Snr, static_cast<uint32_t>(Args.Seed + 1000));
   NormaliseInstance(Train);
   NormaliseInstance(Test);
+  MP.EndDataset();
 
   std::cout << "[info] cuda IMP  InLen=" << H.InLen
             << " Classes=" << H.NumClasses << " Hidden=" << H.Hidden
@@ -748,6 +752,7 @@ int main(int Argc, char **Argv) {
   std::mt19937 InitRng(static_cast<uint32_t>(Args.Seed) * 1000u + 11u);
   WideMLP M;
   M.Init(H.InLen, H.NumClasses, H.Hidden, H.Depth, H.Batch, InitRng, Bl);
+  MP.EndWeights();
 
   // Per-batch staging buffers on the device + host logit mirror.
   DevState DS;
@@ -859,6 +864,7 @@ int main(int Argc, char **Argv) {
   S.Set("jaccard_max", static_cast<double>(JMax));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  rounds=" << FinalRound

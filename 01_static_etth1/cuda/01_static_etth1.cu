@@ -503,10 +503,14 @@ int main(int Argc, char **Argv) {
   // quick smoke runs); 0 = unlimited.
   size_t MaxSteps = static_cast<size_t>(Args.GetInt("max-steps", 0));
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   auto Raw = LoadEtth1(Args.DataDir, Args.Synthetic,
                        static_cast<uint32_t>(Args.Seed));
   StandardisePerChannel(Raw, std::max<size_t>(64, (Raw.T * 7) / 10));
   auto D = Window(Raw, H.InLen, H.OutLen);
+  MP.EndDataset();
   size_t InDim = D.InDim;
   size_t OutDim = D.OutDim;
   size_t NTotal = D.NRows;
@@ -534,6 +538,7 @@ int main(int Argc, char **Argv) {
   std::mt19937 InitRng(static_cast<uint32_t>(Args.Seed) * 1000u + 7u);
   StaticMLP M;
   M.Init(InDim, OutDim, H.Hidden, H.Depth, H.Batch, InitRng, Bl);
+  MP.EndWeights();
 
   // Upload the full windowed dataset to the device once.
   float *dX = nullptr, *dY = nullptr;
@@ -708,6 +713,7 @@ int main(int Argc, char **Argv) {
   S.Set("jaccard_max", static_cast<double>(JMax));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  test_mse=" << TeMse

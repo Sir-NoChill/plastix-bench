@@ -32,6 +32,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common/pytorch"))
 from common import (  # noqa: E402
+    MemoryProbe,
     PhaseTimer,
     StructuralLog,
     add_common_args,
@@ -134,7 +135,7 @@ def td_lambda_run(
     X: np.ndarray, R: np.ndarray, G: np.ndarray,
     *, gamma: float, lam: float, alpha: float,
     log_every: int, log: StructuralLog, device: str,
-    timer: PhaseTimer,
+    timer: PhaseTimer, probe: MemoryProbe | None = None,
 ) -> tuple[torch.Tensor, dict]:
     N, D = X.shape
     # The orchestrator-driven runs sit on CPU; the device argument exists so
@@ -147,6 +148,10 @@ def td_lambda_run(
     e = torch.zeros(D, device=device)
     predictions = torch.zeros(N, device=device)
     ones = torch.ones(D, device=device)
+    # Weight/trace state (and the on-device copies of the stream) are the
+    # learner's constructed footprint here; there's no separate nn.Module.
+    if probe is not None:
+        probe.end_weights()
 
     decay = gamma * lam
 
@@ -205,6 +210,9 @@ def run(args) -> dict:
     np.random.seed(args.seed)
     device = resolve_device(args.device)
 
+    probe = MemoryProbe()
+    probe.start()
+
     path = _resolve_dataset(args.data_dir)
     if path is None:
         raise SystemExit(
@@ -222,6 +230,7 @@ def run(args) -> dict:
     X, R = _load_apbd(path, max_steps)
     N = X.shape[0]
     G = compute_returns(R, args.gamma)
+    probe.end_dataset()
 
     print(f"[info] device={device}  dataset={path}  steps={N}  "
           f"gamma={args.gamma}  alpha={args.alpha}  lambda={args.lam}  "
@@ -236,6 +245,7 @@ def run(args) -> dict:
         X, R, G,
         gamma=args.gamma, lam=args.lam, alpha=args.alpha,
         log_every=log_every, log=log, device=device, timer=timer,
+        probe=probe,
     )
     wall = time.perf_counter() - t0
 
@@ -262,6 +272,7 @@ def run(args) -> dict:
         "n_edges": int(X.shape[1]),
         "seed": args.seed,
         **timer.summary_fields(wall),
+        **probe.summary_fields(),
     }
     write_summary_csv([summary], summary_path, columns=list(summary.keys()))
 

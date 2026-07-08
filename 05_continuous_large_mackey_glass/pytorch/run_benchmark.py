@@ -42,6 +42,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common/pytorch"))
 from common import (  # noqa: E402
+    MemoryProbe,
     PhaseTimer,
     StructuralLog,
     add_common_args,
@@ -290,6 +291,9 @@ def stream(args) -> dict:
     rng = np.random.default_rng(args.seed)
     device = resolve_device(args.device)
 
+    probe = MemoryProbe()
+    probe.start()
+
     # Generate Mackey-Glass series.
     series = mackey_glass(n=args.series_len, tau=args.tau, seed=args.seed)
     # Per-series standardisation.
@@ -304,12 +308,14 @@ def stream(args) -> dict:
     Xtr, Ytr = X[:n_tr], Y[:n_tr]
     Xva, Yva = X[n_tr:n_tr + n_va], Y[n_tr:n_tr + n_va]
     Xte, Yte = X[n_tr + n_va:], Y[n_tr + n_va:]
+    probe.end_dataset()
 
     model = SparseReservoir(in_dim=args.in_len, out_dim=1,
                             hidden=args.init_hidden,
                             recur_density=args.recur_density,
                             device=device, seed=args.seed).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    probe.end_weights()
 
     hist_path, summary_path, plot_path = output_paths(args,
                                                       "continuous_large_mg")
@@ -434,6 +440,7 @@ def stream(args) -> dict:
                                               for r in log.records])), 6),
         "seed": args.seed,
         **timer.summary_fields(wall),
+        **probe.summary_fields(),
     }
     write_summary_csv([summary], summary_path, columns=list(summary.keys()))
     print(f"[done] wall={wall:.1f}s  grows={model.grows}  shrinks={model.shrinks}  "

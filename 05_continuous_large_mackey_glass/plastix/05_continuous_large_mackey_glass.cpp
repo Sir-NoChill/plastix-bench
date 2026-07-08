@@ -405,6 +405,9 @@ int main(int Argc, char **Argv) {
   if (Args.Quick)
     H.MaxSteps = std::max<size_t>(200, H.MaxSteps / 5);
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   auto Series =
       MackeyGlass(H.SeriesLen, H.Tau, static_cast<uint32_t>(Args.Seed));
   Standardise1D(Series, Series.size() / 2);
@@ -413,6 +416,7 @@ int main(int Argc, char **Argv) {
   Windowed(Series, H.InLen, H.Horizon, X, Y);
   size_t NTr = static_cast<size_t>(0.7f * X.size());
   size_t NVa = static_cast<size_t>(0.15f * X.size());
+  MP.EndDataset();
   std::cout << "[info] series=" << Series.size() << " N=" << X.size()
             << " train=" << NTr << " val=" << NVa << " init_h=" << H.InitHidden
             << " max_steps=" << H.MaxSteps << "\n";
@@ -422,6 +426,7 @@ int main(int Argc, char **Argv) {
   auto N = std::unique_ptr<Net>(new Net(
       H.InLen, FCHidden{H.InitHidden, UniformInit{SeedBase + 1, Limit}},
       FCOut{1, UniformInit{SeedBase + 2, Limit}, MarkOutput{}}));
+  MP.EndWeights();
   // Stage runtime params into the managed GlobalState (read by the policies).
   N->Global().Lr = H.Lr;
   N->Global().AddConnSeed = static_cast<uint64_t>(Args.Seed) * 1000ull + 29ull;
@@ -503,9 +508,10 @@ int main(int Argc, char **Argv) {
     Timer.MarkUpdate();
     N->DoPruneUnits();
     N->DoPruneConnections();
+    Timer.MarkPrune();
     N->DoAddUnits();
     N->DoAddConnections();
-    Timer.MarkStructural();
+    Timer.MarkGrow();
     N->DoResetGlobalState();
     Timer.MarkReset();
     Timer.StepDone();
@@ -605,6 +611,7 @@ int main(int Argc, char **Argv) {
             std::max<size_t>(Log.Records().size(), 1));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s grows=" << Grows

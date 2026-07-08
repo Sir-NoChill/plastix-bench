@@ -483,6 +483,9 @@ int main(int Argc, char **Argv) {
     H.LogEvery = std::min<size_t>(H.LogEvery, 100);
   }
 
+  bench::MemoryProbe MP;
+  MP.Start();
+
   auto DatasetPath = ResolveDataset(Args);
   if (DatasetPath.empty() || !std::filesystem::exists(DatasetPath)) {
     std::cerr << "[err] audio-prediction dataset.bin not found.\n";
@@ -500,6 +503,7 @@ int main(int Argc, char **Argv) {
   for (size_t T = 0; T < N; ++T)
     Rewards[T] = DS[T].Reward();
   auto Returns = ComputeReturns(Rewards, hp::Gamma);
+  MP.EndDataset();
 
   using FC = plastix::FullyConnected<ImprintingLearnerConnInit,
                                      ImprintingLearnerOutputUnitInit>;
@@ -528,6 +532,7 @@ int main(int Argc, char **Argv) {
     for (size_t I = 0; I < NU; ++I)
       plastix::GetField<InDegreeTag>(UA, I) = Offsets[I + 1] - Offsets[I];
   }
+  MP.EndWeights();
 
   auto [HistPath, SummaryPath, LogPath] =
       bench::OutputPaths(Args, "audio_imprinting");
@@ -588,6 +593,7 @@ int main(int Argc, char **Argv) {
     auto Sb = std::chrono::steady_clock::now();
     Net.DoPruneConnections();
     auto Sc = std::chrono::steady_clock::now();
+    Timer.MarkPrune();
     Net.DoAddUnits();
     auto Sd = std::chrono::steady_clock::now();
     Net.DoAddConnections();
@@ -596,7 +602,7 @@ int main(int Argc, char **Argv) {
     PruneConnsNs += DurNs(Sb, Sc);
     AddUnitsNs += DurNs(Sc, Sd);
     AddConnsNs += DurNs(Sd, Se);
-    Timer.MarkStructural();
+    Timer.MarkGrow();
     Net.DoResetGlobalState();
     Timer.MarkReset();
     Timer.StepDone();
@@ -663,6 +669,7 @@ int main(int Argc, char **Argv) {
         static_cast<int>(bench::LiveEdgeCount(Net.GetConnAlloc())));
   S.Set("seed", Args.Seed);
   Timer.WriteSummary(S, Wall);
+  MP.WriteSummary(S);
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  test_mse=" << TestMse
