@@ -256,7 +256,8 @@ class PhaseTimer:
         self._loss = _Welford()
         self._backward = _Welford()
         self._update = _Welford()
-        self._structural = _Welford()
+        self._prune = _Welford()
+        self._grow = _Welford()
         self._reset = _Welford()
         self._steps = 0
         self._last: int | None = None
@@ -275,7 +276,10 @@ class PhaseTimer:
     def mark_loss(self)       -> None: self._loss.add(self._delta())
     def mark_backward(self)   -> None: self._backward.add(self._delta())
     def mark_update(self)     -> None: self._update.add(self._delta())
-    def mark_structural(self) -> None: self._structural.add(self._delta())
+    # The old single `structural` phase is split into prune (Prune*) and grow
+    # (Add*) so the two halves of structural adaptation are reported separately.
+    def mark_prune(self)      -> None: self._prune.add(self._delta())
+    def mark_grow(self)       -> None: self._grow.add(self._delta())
     def mark_reset(self)      -> None: self._reset.add(self._delta())
     def step_done(self)       -> None: self._steps += 1
 
@@ -288,7 +292,7 @@ class PhaseTimer:
         step_ns_mean = (wall_seconds * 1e9) / steps
         accounted = (self._forward.mean + self._loss.mean +
                      self._backward.mean + self._update.mean +
-                     self._structural.mean + self._reset.mean)
+                     self._prune.mean + self._grow.mean + self._reset.mean)
         return {
             "step_count":         int(steps),
             "step_ns_mean":       round(step_ns_mean, 3),
@@ -300,8 +304,10 @@ class PhaseTimer:
             "backward_ns_std":    round(self._backward.std(), 3),
             "update_ns_mean":     round(self._update.mean, 3),
             "update_ns_std":      round(self._update.std(), 3),
-            "structural_ns_mean": round(self._structural.mean, 3),
-            "structural_ns_std":  round(self._structural.std(), 3),
+            "prune_ns_mean":      round(self._prune.mean, 3),
+            "prune_ns_std":       round(self._prune.std(), 3),
+            "grow_ns_mean":       round(self._grow.mean, 3),
+            "grow_ns_std":        round(self._grow.std(), 3),
             "reset_ns_mean":      round(self._reset.mean, 3),
             "reset_ns_std":       round(self._reset.std(), 3),
             "other_ns_mean":      round(max(0.0, step_ns_mean - accounted), 3),
@@ -316,10 +322,62 @@ PHASE_COLUMNS = (
     "loss_ns_mean", "loss_ns_std",
     "backward_ns_mean", "backward_ns_std",
     "update_ns_mean", "update_ns_std",
-    "structural_ns_mean", "structural_ns_std",
+    "prune_ns_mean", "prune_ns_std",
+    "grow_ns_mean", "grow_ns_std",
     "reset_ns_mean", "reset_ns_std",
     "other_ns_mean",
 )
+
+
+# ---------------------------------------------------------------------------
+# MemoryProbe — RSS milestone breakdown. Mirrors the C++ helper in
+# common/{cpp,plastix}/common.hpp so a .summary.csv reports where memory goes:
+#   mem_overhead_kb  RSS right after imports/startup (interpreter, torch, .so's)
+#   mem_dataset_kb   RSS delta across the dataset-load block
+#   mem_weights_kb   RSS delta across the model+optimiser-construction block
+# `scratch` (peak − after-model) and `max` (peak) are derived downstream from
+# the orchestrator's polled peak_rss_kb, so they are NOT emitted here.
+#
+# Deltas are order-independent — call each end_*() right after its block.
+# ---------------------------------------------------------------------------
+def read_vmrss_kb() -> int:
+    """Resident set size (kB) of this process, from /proc/self/status."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    return 0
+
+
+class MemoryProbe:
+    def __init__(self) -> None:
+        self._overhead = 0
+        self._dataset = 0
+        self._weights = 0
+        self._cursor = 0
+
+    def start(self) -> None:
+        self._overhead = self._cursor = read_vmrss_kb()
+
+    def end_dataset(self) -> None:
+        r = read_vmrss_kb(); self._dataset += r - self._cursor; self._cursor = r
+
+    def end_weights(self) -> None:
+        r = read_vmrss_kb(); self._weights += r - self._cursor; self._cursor = r
+
+    def summary_fields(self) -> dict:
+        return {
+            "mem_overhead_kb": int(self._overhead),
+            "mem_dataset_kb":  max(0, int(self._dataset)),
+            "mem_weights_kb":  max(0, int(self._weights)),
+        }
+
+
+# Canonical memory column list — keep in lockstep with orchestrator MEM_KEYS.
+MEMORY_COLUMNS = ("mem_overhead_kb", "mem_dataset_kb", "mem_weights_kb")
 
 
 # ---------------------------------------------------------------------------

@@ -354,7 +354,7 @@ private:
 // `WriteSummary` emits canonical column names so runs.csv has one schema:
 //   step_count, step_ns_mean,
 //   forward_ns_mean, loss_ns_mean, backward_ns_mean, update_ns_mean,
-//   structural_ns_mean, reset_ns_mean, other_ns_mean
+//   prune_ns_mean, grow_ns_mean, reset_ns_mean, other_ns_mean
 // Unused phases default to 0; `other_ns_mean` absorbs whatever the marks
 // don't cover (data loading, eval, .item() syncs, Python loop overhead, etc).
 // ---------------------------------------------------------------------------
@@ -393,7 +393,10 @@ public:
   void MarkLoss()       { Loss_.Add(DeltaNs()); }
   void MarkBackward()   { Backward_.Add(DeltaNs()); }
   void MarkUpdate()     { Update_.Add(DeltaNs()); }
-  void MarkStructural() { Structural_.Add(DeltaNs()); }
+  // The old single `structural` phase is split into prune (Prune*) and grow
+  // (Add*) so the two halves of structural adaptation are reported separately.
+  void MarkPrune()      { Prune_.Add(DeltaNs()); }
+  void MarkGrow()       { Grow_.Add(DeltaNs()); }
   void MarkReset()      { Reset_.Add(DeltaNs()); }
   void StepDone()       { ++StepCount_; }
 
@@ -414,10 +417,11 @@ public:
     W(Loss_,       "loss");
     W(Backward_,   "backward");
     W(Update_,     "update");
-    W(Structural_, "structural");
+    W(Prune_,      "prune");
+    W(Grow_,       "grow");
     W(Reset_,      "reset");
     double Sum = Forward_.Mean + Loss_.Mean + Backward_.Mean +
-                 Update_.Mean + Structural_.Mean + Reset_.Mean;
+                 Update_.Mean + Prune_.Mean + Grow_.Mean + Reset_.Mean;
     S.Set("step_count", static_cast<long long>(Steps));
     S.Set("step_ns_mean", StepNsMean);
     S.Set("other_ns_mean", std::max(0.0, StepNsMean - Sum));
@@ -432,8 +436,54 @@ private:
   }
 
   Clk::time_point Last_;
-  PhaseAcc Forward_, Loss_, Backward_, Update_, Structural_, Reset_;
+  PhaseAcc Forward_, Loss_, Backward_, Update_, Prune_, Grow_, Reset_;
   uint64_t StepCount_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// MemoryProbe — breaks resident memory (VmRSS) into milestones so a
+// .summary.csv can report where memory goes:
+//   mem_overhead_kb  RSS right after startup (libs, .bss)
+//   mem_dataset_kb   RSS delta across the dataset-load block
+//   mem_weights_kb   RSS delta across the model/network-construction block
+// `scratch` (peak − after-model) and `max` (peak) are derived downstream from
+// the orchestrator's polled peak_rss_kb, so they are NOT emitted here.
+//
+// Usage (deltas are order-independent — call each End* right after its block):
+//   bench::MemoryProbe MP;
+//   MP.Start();                 // after arg-parse / startup
+//   ... load dataset ...        MP.EndDataset();
+//   ... build model ...         MP.EndWeights();
+//   MP.WriteSummary(S);         // before S.Write(...)
+// ---------------------------------------------------------------------------
+inline long long ReadVmRssKb() {
+  std::ifstream Status("/proc/self/status");
+  std::string Line;
+  while (std::getline(Status, Line)) {
+    if (Line.rfind("VmRSS:", 0) == 0) {
+      std::istringstream Iss(Line.substr(6));
+      long long Kb = 0;
+      Iss >> Kb;
+      return Kb;
+    }
+  }
+  return 0;
+}
+
+class MemoryProbe {
+public:
+  void Start()       { Overhead_ = Cursor_ = ReadVmRssKb(); }
+  void EndDataset()  { long long R = ReadVmRssKb(); Dataset_ += R - Cursor_; Cursor_ = R; }
+  void EndWeights()  { long long R = ReadVmRssKb(); Weights_ += R - Cursor_; Cursor_ = R; }
+
+  void WriteSummary(SummaryWriter &S) const {
+    S.Set("mem_overhead_kb", Overhead_);
+    S.Set("mem_dataset_kb", std::max<long long>(0, Dataset_));
+    S.Set("mem_weights_kb", std::max<long long>(0, Weights_));
+  }
+
+private:
+  long long Overhead_ = 0, Dataset_ = 0, Weights_ = 0, Cursor_ = 0;
 };
 
 } // namespace bench
