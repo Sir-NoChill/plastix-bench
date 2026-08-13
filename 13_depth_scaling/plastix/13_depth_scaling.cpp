@@ -1,20 +1,19 @@
-// Workload 11 — imprinting-style scaling sweep, Plastix.
+// Workload 13 — DEPTH scaling sweep, Plastix.
 //
-// A purpose-built micro-benchmark for the memory/compute SCALING study: build a
-// sparse imprinting-style network of EXACTLY `--neurons N` units (N swept from
-// ~10k to ~10M by the scaling.py driver), run a fixed number of pipeline steps,
-// and report per-step wall time + the RSS memory breakdown. There is NO runtime
-// growth here (the size is the independent variable), and no dataset file — the
-// topology + the sparse binary input stream are generated in-process so any N
-// is exact and reproducible from the seed.
+// Sibling of 11_scaling_imprint, but the independent variable is network DEPTH,
+// not size. Bench 11 pins every non-input unit to level 1 (a 2-level network:
+// inputs -> everything), so its "pipeline" is a single layer advance and the
+// longest input->output chain is one hop. Here we partition the (N - NIn)
+// non-input units into `--depth L` sequential layers at levels 1..L, each unit
+// wired from `--fanin` random units in the previous layer. The longest chain
+// from an input to the output unit is therefore L edges (L+1 nodes), and the
+// Pipeline forward pass processes L level-batches in dependency order.
 //
-// Engineered in the style of workload 10 (same pipeline Forward + TD(λ) edge
-// update), so the plastix-vs-pytorch comparison is apples-to-apples. The single
-// binary is compiled once at a large compile-time capacity; mmap MAP_NORESERVE
-// means the unused capacity costs no physical memory, so `--neurons` simply
-// Allocate()s up to N at runtime.
+// Same per-step compute as bench 11 (Forward + TD(lambda) edge update), fixed
+// topology (no runtime growth), N held constant while L is swept, so edge count
+// stays ~ (N - NIn) * fanin and the measurement isolates the effect of depth.
 //
-//   ForwardPass   Map = w*act[src]; Combine = +; Apply = tanh(sum) (linear out)
+//   ForwardPass   Map = w*act[src]; Combine = +; Apply = tanh(sum)
 //   Loss          G.Delta = target - yhat
 //   UpdateConn    per-edge trace E = DECAY*E + act[src]; w += LR*Delta*E
 //   ResetGlobal   clears the per-step delta
@@ -110,10 +109,6 @@ struct Traits : plastix::DefaultNetworkTraits<Globals> {
 
   static constexpr plastix::Propagation Model = plastix::Propagation::Pipeline;
 
-  // Compiled once at a large capacity; mmap MAP_NORESERVE makes the headroom
-  // free until written. `--neurons` allocates up to UnitCapacity at runtime.
-  // Override at compile time for the very top of the sweep, e.g.
-  //   -DSCALE_UNIT_CAPACITY=12000000 -DSCALE_CONN_CAPACITY=60000000
 #ifndef SCALE_UNIT_CAPACITY
 #define SCALE_UNIT_CAPACITY 12000000
 #endif
@@ -137,48 +132,77 @@ struct Lcg {
   float Unit() { return static_cast<float>(Next()) / 2147483648.0f; }
 };
 
-// Generated sparse DAG: NIn inputs at level 0, then (N-NIn) units each wired
-// from Fanin distinct earlier ids (src < dst, so the pipeline advances one
-// layer/step). The last id is the linear output unit.
-struct ScaleBuilder {
-  size_t N;       // total units
-  uint32_t NIn;   // input units
-  uint32_t Fanin; // incoming edges per non-input unit
+// Layered sparse DAG: NIn inputs at level 0, then the remaining units split
+// across `Layers` sequential levels 1..Layers. Each unit draws `Fanin` distinct
+// sources from the immediately preceding layer, so the only path from input to
+// output runs through every level -> depth = Layers.
+struct DepthBuilder {
+  size_t N;
+  uint32_t NIn;
+  uint32_t Fanin;
+  uint32_t Layers;
   uint64_t Seed;
 
   template <typename UnitAlloc, typename ConnAlloc>
   PLASTIX_HOST plastix::UnitRange operator()(UnitAlloc &UA, ConnAlloc &CA,
-                                             plastix::UnitRange) const {
+                                             plastix::UnitRange Inputs) const {
     using namespace plastix;
     Lcg Rng(Seed);
     const uint32_t OutId = static_cast<uint32_t>(N - 1);
-    for (size_t I = 0; I < NIn; ++I) {
-      GetLevel(UA, I) = 0;
-      GetField<IsOutputTag>(UA, I) = 0;
-    }
-    std::vector<uint32_t> Used;
-    Used.reserve(Fanin);
-    for (size_t Id = NIn; Id < N; ++Id) {
-      auto New = UA.Allocate();
-      GetLevel(UA, New) = 1;
-      GetField<IsOutputTag>(UA, New) = (New == OutId) ? 1 : 0;
-      // Fanin distinct sources from [0, Id).
-      Used.clear();
-      uint32_t Added = 0, Attempts = 0;
-      uint32_t Want = std::min<uint32_t>(Fanin, static_cast<uint32_t>(Id));
-      while (Added < Want && Attempts < Want * 8u + 8u) {
-        ++Attempts;
-        uint32_t Src = Rng.Next() % static_cast<uint32_t>(Id);
-        if (std::find(Used.begin(), Used.end(), Src) != Used.end())
-          continue;
-        Used.push_back(Src);
-        auto C = CA.Allocate();
-        GetField<FromIdTag>(CA, C) = Src;
-        GetField<ToIdTag>(CA, C) = static_cast<uint32_t>(New);
-        GetField<SrcLevelTag>(CA, C) = GetLevel(UA, Src);
-        GetWeight(CA, C) = Rng.Unit() * 0.02f - 0.01f;
-        ++Added;
+    const size_t Hidden = N - NIn;
+    const uint32_t L = std::max<uint32_t>(1u, Layers);
+
+    size_t PrevBegin = Inputs.Begin;
+    size_t PrevEnd = Inputs.End;
+    uint16_t PrevLevel = 0;
+    size_t Made = 0;
+
+    for (uint32_t Lay = 1; Lay <= L; ++Lay) {
+      const size_t Remaining = Hidden - Made;
+      const uint32_t LayersLeft = L - Lay + 1;
+      size_t LayerSize = (Lay == L) ? Remaining : Remaining / LayersLeft;
+      if (LayerSize == 0)
+        LayerSize = 1;
+      const size_t Begin = NIn + Made;
+      const size_t End = Begin + LayerSize;
+      const uint16_t Level = static_cast<uint16_t>(Lay);
+      const size_t PrevSize = PrevEnd - PrevBegin;
+
+      for (size_t Id = Begin; Id < End && Id < N; ++Id) {
+        auto New = UA.Allocate();
+        GetLevel(UA, New) = Level;
+        GetField<IsOutputTag>(UA, New) = (New == OutId) ? 1 : 0;
+
+        const uint32_t Want =
+            std::min<uint32_t>(std::min<uint32_t>(Fanin, 16u),
+                               static_cast<uint32_t>(PrevSize));
+        std::array<uint32_t, 16> Used{};
+        uint32_t Added = 0, Attempts = 0;
+        while (Added < Want && Attempts < Want * 8u + 8u) {
+          ++Attempts;
+          const uint32_t Off = Rng.Next() % static_cast<uint32_t>(PrevSize);
+          const uint32_t Src = static_cast<uint32_t>(PrevBegin + Off);
+          bool Dup = false;
+          for (uint32_t K = 0; K < Added; ++K)
+            if (Used[K] == Src) {
+              Dup = true;
+              break;
+            }
+          if (Dup)
+            continue;
+          Used[Added] = Src;
+          auto C = CA.Allocate();
+          GetField<FromIdTag>(CA, C) = Src;
+          GetField<ToIdTag>(CA, C) = static_cast<uint32_t>(New);
+          GetField<SrcLevelTag>(CA, C) = PrevLevel;
+          GetWeight(CA, C) = Rng.Unit() * 0.02f - 0.01f;
+          ++Added;
+        }
       }
+      Made += (End - Begin);
+      PrevBegin = Begin;
+      PrevEnd = End;
+      PrevLevel = Level;
     }
     return UnitRange{OutId, OutId + 1};
   }
@@ -189,15 +213,16 @@ struct ScaleBuilder {
 int main(int Argc, char **Argv) {
   auto Args = bench::CliArgs::Parse(Argc, Argv);
 
-  size_t Neurons = static_cast<size_t>(Args.GetInt("neurons", 10000));
+  size_t Neurons = static_cast<size_t>(Args.GetInt("neurons", 100000));
   uint32_t NIn = static_cast<uint32_t>(Args.GetInt("inputs", 64));
   uint32_t Fanin = static_cast<uint32_t>(Args.GetInt("fanin", 4));
-  size_t Steps = static_cast<size_t>(Args.GetInt("steps", 500));
+  uint32_t Depth = static_cast<uint32_t>(Args.GetInt("depth", 8));
+  size_t Steps = static_cast<size_t>(Args.GetInt("steps", 200));
   if (Args.Quick) {
     Neurons = std::min<size_t>(Neurons, 20000);
     Steps = std::min<size_t>(Steps, 100);
   }
-  Neurons = std::max<size_t>(Neurons, NIn + 2);
+  Neurons = std::max<size_t>(Neurons, NIn + Depth + 1);
   if (Neurons > Traits::UnitCapacity) {
     std::cerr << "[err] neurons=" << Neurons << " exceeds compile-time "
               << "UnitCapacity=" << Traits::UnitCapacity
@@ -207,16 +232,17 @@ int main(int Argc, char **Argv) {
 
   bench::MemoryProbe MP;
   MP.Start();
-  // No external dataset — the input stream is generated per step below.
   MP.EndDataset();
 
   std::cout << "[info] neurons=" << Neurons << " inputs=" << NIn
-            << " fanin=" << Fanin << " steps=" << Steps << "\n";
+            << " fanin=" << Fanin << " depth=" << Depth << " steps=" << Steps
+            << "\n";
 
   auto InputInit = [](auto &U, size_t Id) {
     plastix::GetField<IsOutputTag>(U, Id) = 0;
   };
-  Net Network(NIn, InputInit, ScaleBuilder{Neurons, NIn, Fanin, 0x1234ull + Args.Seed});
+  Net Network(NIn, InputInit,
+              DepthBuilder{Neurons, NIn, Fanin, Depth, 0x1234ull + Args.Seed});
   MP.EndWeights();
 
   auto &UA = Network.GetUnitAlloc();
@@ -224,7 +250,7 @@ int main(int Argc, char **Argv) {
   const size_t NEdges = bench::LiveEdgeCount(CA);
 
   auto [HistPath, SummaryPath, LogPath] =
-      bench::OutputPaths(Args, "scaling_imprint");
+      bench::OutputPaths(Args, "depth_scaling");
   bench::StructuralLog Log(HistPath);
 
   Lcg Rng(0xABCDEFull + Args.Seed);
@@ -235,10 +261,9 @@ int main(int Argc, char **Argv) {
   bench::PhaseTimer Timer;
   auto T0 = std::chrono::steady_clock::now();
   for (size_t T = 0; T < Steps; ++T) {
-    // Sparse binary input (imprinting-style); target = mean of active inputs.
     float Active = 0.0f;
     for (uint32_t I = 0; I < NIn; ++I) {
-      float Bit = (Rng.Next() & 7u) == 0u ? 1.0f : 0.0f; // ~1/8 sparsity
+      float Bit = (Rng.Next() & 7u) == 0u ? 1.0f : 0.0f;
       Features[I] = Bit;
       Active += Bit;
     }
@@ -255,8 +280,7 @@ int main(int Argc, char **Argv) {
     Timer.MarkPrune();
     Timer.MarkGrow();
     // compression-branch API: Network::Global() is private; read the output
-    // activation instead. yhat == G.V, so target - yhat == the loss delta the
-    // update policy consumed internally this step.
+    // activation instead (yhat == G.V, so target - yhat == the loss delta).
     float Delta = TargetBuf[0] - Network.GetOutput()[0];
     Network.DoResetGlobalState();
     Timer.MarkReset();
@@ -273,12 +297,14 @@ int main(int Argc, char **Argv) {
           {{"test_mse", Mse},
            {"n_units", static_cast<double>(UA.Size())},
            {"n_edges", static_cast<double>(NEdges)},
+           {"depth", static_cast<double>(Depth)},
            {"step", static_cast<double>(Steps)}});
   Log.Flush();
 
   bench::SummaryWriter S;
-  S.Set("workload", std::string{"11_scaling_imprint"});
+  S.Set("workload", std::string{"13_depth_scaling"});
   S.Set("neurons", static_cast<long long>(Neurons));
+  S.Set("depth", static_cast<int>(Depth));
   S.Set("max_steps", static_cast<int>(Steps));
   S.Set("wall_seconds", Wall);
   S.Set("test_mse", Mse);
@@ -291,7 +317,7 @@ int main(int Argc, char **Argv) {
   S.Write(SummaryPath);
 
   std::cout << "[done] wall=" << Wall << "s  units=" << UA.Size()
-            << "  edges=" << NEdges << "  step_ns="
+            << "  edges=" << NEdges << "  depth=" << Depth << "  step_ns="
             << (Wall * 1e9 / static_cast<double>(std::max<size_t>(1, Steps)))
             << "\n";
   (void)LogPath;

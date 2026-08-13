@@ -114,7 +114,7 @@ def run(args) -> dict:
     mse = sse / max(1, steps)
 
     hist_path, summary_path, _ = output_paths(args, "scaling_imprint")
-    log.log(1, n_units=neurons, n_edges=int(e), edges=None,
+    log.log(n_units=neurons, n_edges=int(e), edges=None,
             val_loss=mse, test_mse=mse, step=steps)
     log.flush()
 
@@ -145,7 +145,9 @@ def main() -> None:
     p.add_argument("--inputs", type=int, default=64)
     p.add_argument("--fanin", type=int, default=4)
     p.add_argument("--steps", type=int, default=500)
-    p.add_argument("--device", type=str, default="cpu")
+    # NOTE: --device is already provided by add_common_args() above; re-adding
+    # it here raises argparse.ArgumentError (duplicate option string). Pass
+    # --device cpu on the CLI to pin it.
     args = p.parse_args()
     run(args)
 

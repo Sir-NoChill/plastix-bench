@@ -133,6 +133,45 @@ standalone with `just phase-table` / `just memory-table`. The memory table's
 — the same tables but with **every** framework sourced from the GPU pass, so GPU
 timings + VRAM show for all of them (not just `cuda`).
 
+## Paper figure data
+
+`just figures-data` (`figures_data.py`) projects the same archives into the CSV
+schema the paper's pgfplots figures actually consume — per-work-unit wall seconds
+per phase, and MiB per RSS bucket — under
+`_results/figures/{segmented_bar_perf,memory_occupancy}/data/`.
+
+This is a different schema from the summary tables above: the figures plot
+*absolute* seconds per unit of work (the table plots 0-100% fractions), and they
+carry a sixth `uncat` phase so the decomposition is loss-less.
+
+**Benchmark set.** The figures draw the five benchmarks in
+`figures_data.CANON_BENCHES` (Sparse, Bursty, Cont-S, Cont-L, Imprint) — the ones
+with complete four-framework coverage and working phase timers in the current
+archive. `docs/figure_bench_selection.md` records why each of the others (Dense,
+LTC-sine, ESN, SNN, XL-NN) is excluded, and what the retained five actually show
+— including the fact that the CPU throughput claim does **not** reproduce.
+Changing the length of `CANON_BENCHES` no longer requires editing the `.tex`: the
+figures size themselves from `\sbpnb`, which the standalone wrappers set.
+
+**Two views.** Each figure is emitted twice:
+
+- `*.csv` — **CPU view**: `plastix`/`pytorch`/`cpp` on CPU + the `cuda` backend.
+- `*_gpu.csv` — **GPU view**: every column from the GPU pass, so the CUDA backend
+  is compared against GPU-resident PyTorch and JAX. There is no cpp GPU impl, so
+  the third bar slot carries JAX (under the reused `cpp_*` column prefix, so one
+  `figure.tex` renders either view). Build it with the `standalone_gpu.tex`
+  wrapper in each figure's `combined/` directory.
+
+**Data root.** `--results-dir` selects the tree to read (archives *and* the
+per-bench `summary.csv` files that the work-axis normalization falls back on).
+It defaults to `./_results`, so if you untar a results bundle somewhere else,
+pass it explicitly:
+
+```sh
+just figures-data -- --results-dir ../_results \
+                     --figures-dir ../plastix-paper/figures
+```
+
 ## Profiling (nsys / nvprof)
 
 Profile a bench's **GPU** binary under an NVIDIA profiler; reports land in

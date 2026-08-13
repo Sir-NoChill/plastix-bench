@@ -121,6 +121,32 @@ tables-gpu:
     uv run python phase_table.py --gpu
     uv run python memory_table.py --gpu
 
+# ETL: project the archived runs into the pgfplots figure data CSVs, written
+# under _results/figures/{segmented_bar_perf,memory_occupancy}/data/*.csv (so
+# they ship inside the results tarball). Unlike the summary tables above, this
+# emits the exact per-figure schema the .tex consumes (per-work-unit wall
+# seconds per phase; MiB per RSS bucket) for the five figure benchmarks
+# (figures_data.CANON_BENCHES; see docs/figure_bench_selection.md for why those
+# five). Each figure gets two views: `*.csv` (CPU) and `*_gpu.csv` (every column
+# from the GPU pass, JAX in the cpp slot).
+#
+# Pass `-- --figures-dir /path/to/plastix-paper/figures` to write straight into
+# a paper checkout. If the results tree you want lives somewhere other than
+# ./_results (e.g. a tarball untarred at the workspace root), point
+# `-- --results-dir /path/to/_results` at it -- otherwise this silently reads
+# whatever stale _results happens to be in-tree.
+figures-data *ARGS:
+    uv run python figures_data.py {{ARGS}}
+
+# Bundle the ENTIRE results tree into one self-contained tarball rooted at
+# _results/ (raw runs, per-bench summaries, aggregate tables, and the generated
+# figure CSVs under _results/figures). Regenerates the tables + figure CSVs
+# first so the bundle is current, then tars. Untar anywhere and everything the
+# paper's figures need is under _results/figures/<fig>/data/*.csv.
+results-tarball: tables figures-data
+    tar czf plastix-results.tar.gz -C "{{justfile_directory()}}" _results
+    @echo "wrote plastix-results.tar.gz (root: _results/)"
+
 # Opt-in scaling sweep: the 11_scaling_imprint bench (imprinting-style net) from
 # ~10k to ~10M neurons, plastix vs pytorch, one subprocess per (size,framework)
 # for clean per-size peak RSS. Records each framework's OOM/timeout ceiling and
