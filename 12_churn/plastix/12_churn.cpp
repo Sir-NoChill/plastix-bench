@@ -156,8 +156,8 @@ struct DepthBuilder {
             continue;
           Used[Added] = Src;
           auto Cn = C.Allocate();
-          GetField<FromIdTag>(C, Cn) = Src;
-          GetField<ToIdTag>(C, Cn) = static_cast<uint32_t>(New);
+          GetField<FromIdTag>(C, Cn) = plastix::GlobalUnitId{Src};
+          GetField<ToIdTag>(C, Cn) = plastix::GlobalUnitId{static_cast<uint32_t>(New)};
           GetField<SrcLevelTag>(C, Cn) = PrevLevel;
           GetWeight(C, Cn) = Rng.Unit() * 0.02f - 0.01f;
           ++Added;
@@ -196,8 +196,8 @@ void RunOne(size_t Neurons, uint32_t NIn, uint32_t Fanin, uint32_t Depth,
   for (size_t C = 0; C < CA.Size(); ++C) {
     if (plastix::GetField<plastix::DeadTag>(CA, C))
       continue;
-    uint64_t Key = (static_cast<uint64_t>(plastix::GetField<plastix::FromIdTag>(CA, C)) << 32) |
-                   plastix::GetField<plastix::ToIdTag>(CA, C);
+    uint64_t Key = (static_cast<uint64_t>(plastix::GetField<plastix::FromIdTag>(CA, C).Value) << 32) |
+                   plastix::GetField<plastix::ToIdTag>(CA, C).Value;
     uint64_t H = Key * 0x9E3779B97F4A7C15ull;
     Sum += H;
     Xor ^= H;

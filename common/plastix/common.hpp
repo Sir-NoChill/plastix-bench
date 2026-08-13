@@ -244,8 +244,8 @@ template <typename ConnAlloc> inline EdgeSet LiveEdgeSet(ConnAlloc &CA) {
   for (size_t I = 0; I < N; ++I) {
     if (plastix::GetField<plastix::DeadTag>(CA, I))
       continue;
-    auto F = plastix::GetField<plastix::FromIdTag>(CA, I);
-    auto T = plastix::GetField<plastix::ToIdTag>(CA, I);
+    auto F = plastix::GetField<plastix::FromIdTag>(CA, I).Value;
+    auto T = plastix::GetField<plastix::ToIdTag>(CA, I).Value;
     S.insert(PackEdge(F, T));
   }
   return S;

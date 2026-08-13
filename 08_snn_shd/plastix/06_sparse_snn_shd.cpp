@@ -354,9 +354,9 @@ struct LocalSparseLayer {
         auto Src = Pool[I];
         auto ConnId = CA.Allocate();
         plastix::GetField<plastix::FromIdTag>(CA, ConnId) =
-            static_cast<uint32_t>(Src);
+            plastix::GlobalUnitId{static_cast<uint32_t>(Src)};
         plastix::GetField<plastix::ToIdTag>(CA, ConnId) =
-            static_cast<uint32_t>(Id);
+            plastix::GlobalUnitId{static_cast<uint32_t>(Id)};
         plastix::GetField<plastix::SrcLevelTag>(CA, ConnId) = SrcLevel;
         plastix::GetWeight(CA, ConnId) = W(Rng);
         plastix::GetField<EligibilityTag>(CA, ConnId) = 0.0f;
@@ -402,9 +402,9 @@ struct DenseOutputLayer {
       for (auto Src : Prev.Ids()) {
         auto ConnId = CA.Allocate();
         plastix::GetField<plastix::FromIdTag>(CA, ConnId) =
-            static_cast<uint32_t>(Src);
+            plastix::GlobalUnitId{static_cast<uint32_t>(Src)};
         plastix::GetField<plastix::ToIdTag>(CA, ConnId) =
-            static_cast<uint32_t>(Id);
+            plastix::GlobalUnitId{static_cast<uint32_t>(Id)};
         plastix::GetField<plastix::SrcLevelTag>(CA, ConnId) = SrcLevel;
         plastix::GetWeight(CA, ConnId) = W(Rng);
         plastix::GetField<EligibilityTag>(CA, ConnId) = 0.0f;

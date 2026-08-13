@@ -439,8 +439,8 @@ static void RepairSplitWeights(Net &N, size_t ParentId, size_t NewId,
   for (size_t C = 0; C < CA.Size(); ++C) {
     if (plastix::GetField<plastix::DeadTag>(CA, C))
       continue;
-    uint32_t F = plastix::GetField<plastix::FromIdTag>(CA, C);
-    uint32_t T = plastix::GetField<plastix::ToIdTag>(CA, C);
+    uint32_t F = plastix::GetField<plastix::FromIdTag>(CA, C).Value;
+    uint32_t T = plastix::GetField<plastix::ToIdTag>(CA, C).Value;
     if (T == ParentId) {
       ParentIncoming[F] = plastix::GetWeight(CA, C);
     } else if (F == ParentId) {
@@ -454,8 +454,8 @@ static void RepairSplitWeights(Net &N, size_t ParentId, size_t NewId,
   for (size_t C = 0; C < CA.Size(); ++C) {
     if (plastix::GetField<plastix::DeadTag>(CA, C))
       continue;
-    uint32_t F = plastix::GetField<plastix::FromIdTag>(CA, C);
-    uint32_t T = plastix::GetField<plastix::ToIdTag>(CA, C);
+    uint32_t F = plastix::GetField<plastix::FromIdTag>(CA, C).Value;
+    uint32_t T = plastix::GetField<plastix::ToIdTag>(CA, C).Value;
     if (T == NewId) {
       auto It = ParentIncoming.find(F);
       if (It != ParentIncoming.end())

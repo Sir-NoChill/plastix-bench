@@ -253,8 +253,8 @@ struct TopologyBuilder {
     // Add every edge with weight 0 and zero eligibility trace (default-init).
     for (const auto &[Src, Dst] : T.Edges) {
       auto ConnId = CA.Allocate();
-      GetField<FromIdTag>(CA, ConnId) = Src;
-      GetField<ToIdTag>(CA, ConnId) = Dst;
+      GetField<FromIdTag>(CA, ConnId) = plastix::GlobalUnitId{Src};
+      GetField<ToIdTag>(CA, ConnId) = plastix::GlobalUnitId{Dst};
       GetField<SrcLevelTag>(CA, ConnId) =
           static_cast<uint16_t>(T.Layer[Src]);
       GetWeight(CA, ConnId) = 0.0f;
@@ -399,9 +399,9 @@ int main(int Argc, char **Argv) {
           auto C = CA.Allocate();
           if (C == static_cast<size_t>(-1))
             break;
-          plastix::GetField<plastix::FromIdTag>(CA, C) = Src;
+          plastix::GetField<plastix::FromIdTag>(CA, C) = plastix::GlobalUnitId{Src};
           plastix::GetField<plastix::ToIdTag>(CA, C) =
-              static_cast<uint32_t>(NewId);
+              plastix::GlobalUnitId{static_cast<uint32_t>(NewId)};
           plastix::GetField<plastix::SrcLevelTag>(CA, C) =
               plastix::GetLevel(UA, Src);
           plastix::GetWeight(CA, C) = 0.0f;
@@ -412,8 +412,8 @@ int main(int Argc, char **Argv) {
         auto Co = CA.Allocate();
         if (Co != static_cast<size_t>(-1)) {
           plastix::GetField<plastix::FromIdTag>(CA, Co) =
-              static_cast<uint32_t>(NewId);
-          plastix::GetField<plastix::ToIdTag>(CA, Co) = Topo.OutputId;
+              plastix::GlobalUnitId{static_cast<uint32_t>(NewId)};
+          plastix::GetField<plastix::ToIdTag>(CA, Co) = plastix::GlobalUnitId{Topo.OutputId};
           plastix::GetField<plastix::SrcLevelTag>(CA, Co) =
               plastix::GetLevel(UA, NewId);
           plastix::GetWeight(CA, Co) = 0.0f;
@@ -426,7 +426,7 @@ int main(int Argc, char **Argv) {
           break;
         uint32_t Idx = Rng.Next() % static_cast<uint32_t>(LiveEdges.size());
         size_t C = LiveEdges[Idx];
-        if (plastix::GetField<plastix::ToIdTag>(CA, C) == Topo.OutputId)
+        if (plastix::GetField<plastix::ToIdTag>(CA, C) == plastix::GlobalUnitId{Topo.OutputId})
           continue; // keep the output connected
         plastix::GetField<plastix::DeadTag>(CA, C) = true;
         LiveEdges[Idx] = LiveEdges.back();

@@ -321,8 +321,8 @@ struct NCPWiringBuilder {
 
     auto MakeEdge = [&](size_t SrcId, size_t DstId) {
       auto Cid = Ca.Allocate();
-      GetField<FromIdTag>(Ca, Cid)   = static_cast<uint32_t>(SrcId);
-      GetField<ToIdTag>(Ca, Cid)     = static_cast<uint32_t>(DstId);
+      GetField<FromIdTag>(Ca, Cid)   = plastix::GlobalUnitId{static_cast<uint32_t>(SrcId)};
+      GetField<ToIdTag>(Ca, Cid)     = plastix::GlobalUnitId{static_cast<uint32_t>(DstId)};
       GetField<SrcLevelTag>(Ca, Cid) = GetLevel(Ua, SrcId);
       GetWeight(Ca, Cid)             = SignedW(Rng);
       GetField<GammaTag>(Ca, Cid)    = 1.0f;
@@ -725,8 +725,8 @@ int main(int Argc, char **Argv) {
     for (size_t Cid = 0; Cid < Ca.Size(); ++Cid) {
       if (plastix::GetField<plastix::DeadTag>(Ca, Cid))
         continue;
-      uint32_t F = plastix::GetField<plastix::FromIdTag>(Ca, Cid);
-      uint32_t T = plastix::GetField<plastix::ToIdTag>(Ca, Cid);
+      uint32_t F = plastix::GetField<plastix::FromIdTag>(Ca, Cid).Value;
+      uint32_t T = plastix::GetField<plastix::ToIdTag>(Ca, Cid).Value;
       // From-side kind: inputs are at level 0 and have no KindTag set;
       // tag them with a sentinel 255 ("Input") so the plotter can colour
       // them distinctly.

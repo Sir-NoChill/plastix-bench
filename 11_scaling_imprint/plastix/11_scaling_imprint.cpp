@@ -173,8 +173,8 @@ struct ScaleBuilder {
           continue;
         Used.push_back(Src);
         auto C = CA.Allocate();
-        GetField<FromIdTag>(CA, C) = Src;
-        GetField<ToIdTag>(CA, C) = static_cast<uint32_t>(New);
+        GetField<FromIdTag>(CA, C) = plastix::GlobalUnitId{Src};
+        GetField<ToIdTag>(CA, C) = plastix::GlobalUnitId{static_cast<uint32_t>(New)};
         GetField<SrcLevelTag>(CA, C) = GetLevel(UA, Src);
         GetWeight(CA, C) = Rng.Unit() * 0.02f - 0.01f;
         ++Added;

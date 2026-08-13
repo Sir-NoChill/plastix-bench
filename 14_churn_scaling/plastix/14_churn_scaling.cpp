@@ -200,8 +200,8 @@ struct DepthBuilder {
             continue;
           Used[Added] = Src;
           auto Cn = C.Allocate();
-          GetField<FromIdTag>(C, Cn) = Src;
-          GetField<ToIdTag>(C, Cn) = static_cast<uint32_t>(New);
+          GetField<FromIdTag>(C, Cn) = plastix::GlobalUnitId{Src};
+          GetField<ToIdTag>(C, Cn) = plastix::GlobalUnitId{static_cast<uint32_t>(New)};
           GetField<SrcLevelTag>(C, Cn) = PrevLevel;
           GetWeight(C, Cn) = Rng.Unit() * 0.02f - 0.01f;
           ++Added;

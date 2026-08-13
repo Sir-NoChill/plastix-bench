@@ -165,8 +165,8 @@ struct ReservoirBuilder {
     // Input edge: input -> reservoir i, weight W_in[i].
     for (int I = 0; I < N; ++I) {
       auto C = CA.Allocate();
-      GetField<FromIdTag>(CA, C) = static_cast<uint32_t>(InputId);
-      GetField<ToIdTag>(CA, C) = static_cast<uint32_t>(Res[I]);
+      GetField<FromIdTag>(CA, C) = plastix::GlobalUnitId{static_cast<uint32_t>(InputId)};
+      GetField<ToIdTag>(CA, C) = plastix::GlobalUnitId{static_cast<uint32_t>(Res[I])};
       GetField<SrcLevelTag>(CA, C) = 0;
       GetWeight(CA, C) = WIn[I];
     }
@@ -177,8 +177,8 @@ struct ReservoirBuilder {
           continue;
         float W = WRec[static_cast<size_t>(I) * N + J];
         auto C = CA.Allocate();
-        GetField<FromIdTag>(CA, C) = static_cast<uint32_t>(Res[J]);
-        GetField<ToIdTag>(CA, C) = static_cast<uint32_t>(Res[I]);
+        GetField<FromIdTag>(CA, C) = plastix::GlobalUnitId{static_cast<uint32_t>(Res[J])};
+        GetField<ToIdTag>(CA, C) = plastix::GlobalUnitId{static_cast<uint32_t>(Res[I])};
         GetField<SrcLevelTag>(CA, C) = 1;
         GetWeight(CA, C) = W;
       }
