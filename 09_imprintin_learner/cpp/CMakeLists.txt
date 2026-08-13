@@ -6,7 +6,7 @@ project(imprinting_learner
     LANGUAGES CXX)
 
 # --- Global C++ standard ---------------------------------------------------
-set(CMAKE_CXX_STANDARD 26)            # C++26 (a.k.a. C++2c)
+set(CMAKE_CXX_STANDARD 23)            # C++23 -- only C++23 feature used is std::print (src/main.cpp)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -42,7 +42,7 @@ add_library(il::core ALIAS il_core)
 target_include_directories(il_core INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
-target_compile_features(il_core INTERFACE cxx_std_26)
+target_compile_features(il_core INTERFACE cxx_std_23)
 
 # --- Linear algebra library ------------------------------------------------
 add_library(il_linalg src/linalg.cpp)
