@@ -100,6 +100,53 @@ BENCH_CHARACTERISTICS = {
 CHARACTERISTIC_COLS = ("gen_neuron", "gen_conn", "del_neuron", "del_conn",
                        "sparsity", "apriori")
 
+# ---------------------------------------------------------------------------
+# Work-axis normalization.
+#
+# `wall_seconds` alone is NOT a fair cross-framework comparison: every impl runs
+# the SAME amount of training (identical epochs / rounds / stream steps), but the
+# SGD granularity differs -- Plastix takes per-sample steps where the minibatched
+# impls take one step per batch (bench 02: Plastix 100k `step_count` vs cpp 700
+# for the same 20 rounds). Dividing by each impl's own `step_count` would reward
+# that granularity difference; per the project decision we normalize instead by
+# the *shared* natural work axis (the minibatch/epoch-level count that is equal
+# across impls), so the ratio between frameworks reflects wall-to-train-as-run.
+#
+# WORK_AXIS[bench] is a priority list of summary columns; the first present,
+# positive one is the divisor. For the streaming benches `step_count` already
+# equals `max_steps` for every impl (no per-sample inflation), so either works;
+# we name `max_steps` to be explicit. WORK_UNIT[bench] is a short label for
+# captions ("s / epoch", "s / step", ...). ESN (07) is a one-pass reservoir fit
+# with no epoch loop, so its shared axis is the sequence length (`step_count`,
+# equal across impls up to the wash/train split).
+# ---------------------------------------------------------------------------
+WORK_AXIS = {
+    "01_static_etth1":                  ("epochs",),
+    "02_idempotent_imp":                ("rounds_run", "max_rounds"),
+    "03_bursty_elec2":                  ("max_steps",),
+    "04_continuous_small_appliances":   ("max_steps",),
+    "05_continuous_large_mackey_glass": ("max_steps",),
+    "06_ccwc_ncp":                      ("epochs",),
+    "07_esn_mackey_class":              ("step_count",),
+    "08_snn_shd":                       ("epochs",),
+    "09_imprintin_learner":             ("max_steps",),
+    "10_engineered_sparse_large_nn":    ("max_steps",),
+    "11_scaling_imprint":               ("max_steps", "steps"),
+}
+WORK_UNIT = {
+    "01_static_etth1":                  "epoch",
+    "02_idempotent_imp":                "round",
+    "03_bursty_elec2":                  "step",
+    "04_continuous_small_appliances":   "step",
+    "05_continuous_large_mackey_glass": "step",
+    "06_ccwc_ncp":                      "epoch",
+    "07_esn_mackey_class":              "seq",
+    "08_snn_shd":                       "epoch",
+    "09_imprintin_learner":             "step",
+    "10_engineered_sparse_large_nn":    "step",
+    "11_scaling_imprint":               "step",
+}
+
 
 def f(row: dict, key: str) -> float:
     """Read a float cell, treating missing / blank / NaN as 0.0."""
@@ -111,6 +158,23 @@ def f(row: dict, key: str) -> float:
     except (TypeError, ValueError):
         return 0.0
     return 0.0 if x != x else x  # NaN -> 0
+
+
+def work_units(bench_id: str, row: dict) -> float:
+    """Shared natural-work-axis count for one run's summary/runs row.
+
+    The first present, positive column in WORK_AXIS[bench]; 0.0 if none (callers
+    treat 0 as "cannot normalize" and fall back to raw wall)."""
+    for key in WORK_AXIS.get(bench_id, ()):
+        v = f(row, key)
+        if v > 0.0:
+            return v
+    return 0.0
+
+
+def work_unit_label(bench_id: str) -> str:
+    """Short label for the work axis unit (for figure / table captions)."""
+    return WORK_UNIT.get(bench_id, "unit")
 
 
 def load_archive(path: Path) -> dict[tuple[str, str], dict]:

@@ -34,6 +34,9 @@ __pycache__/
 /_plots*/
 /_results/
 
+# Bundled results tarball (just results-tarball)
+/plastix-results.tar.gz
+
 # CUDA profiler outputs (profile.py: nsys .nsys-rep / nvprof .csv / .nvvp)
 /_profiles/
 
