@@ -127,6 +127,24 @@ struct Traits : plastix::DefaultNetworkTraits<Globals> {
 static_assert(plastix::NetworkTraits<Traits>);
 using Net = plastix::Network<Traits>;
 
+// Two-shard policy: level 0 on shard 0, deeper levels on shard 1. Pipeline
+// sharded routes through the Topological sharded dispatchers under the
+// library's level-serialized shortcut (see plastix.hpp).
+struct TwoShardOnLevel1 {
+  static constexpr uint16_t NumShards = 2;
+  static constexpr bool IsContiguousByLevel = true;
+  static constexpr plastix::ShardId Assign(uint32_t, uint16_t Level) {
+    return plastix::ShardId{Level == 0 ? uint16_t{0} : uint16_t{1}};
+  }
+};
+
+struct TraitsSharded : Traits {
+  using Sharding = TwoShardOnLevel1;
+};
+static_assert(plastix::NetworkTraits<TraitsSharded>);
+
+using NetSharded = plastix::Network<TraitsSharded>;
+
 struct Lcg {
   uint64_t State;
   explicit Lcg(uint64_t Seed) : State(Seed ? Seed : 0x9E3779B97F4A7C15ull) {}
@@ -184,40 +202,36 @@ struct ScaleBuilder {
   }
 };
 
-} // namespace
-
-int main(int Argc, char **Argv) {
-  auto Args = bench::CliArgs::Parse(Argc, Argv);
-
-  size_t Neurons = static_cast<size_t>(Args.GetInt("neurons", 10000));
-  uint32_t NIn = static_cast<uint32_t>(Args.GetInt("inputs", 64));
-  uint32_t Fanin = static_cast<uint32_t>(Args.GetInt("fanin", 4));
-  size_t Steps = static_cast<size_t>(Args.GetInt("steps", 500));
-  if (Args.Quick) {
-    Neurons = std::min<size_t>(Neurons, 20000);
-    Steps = std::min<size_t>(Steps, 100);
-  }
-  Neurons = std::max<size_t>(Neurons, NIn + 2);
-  if (Neurons > Traits::UnitCapacity) {
-    std::cerr << "[err] neurons=" << Neurons << " exceeds compile-time "
-              << "UnitCapacity=" << Traits::UnitCapacity
-              << " (rebuild with -DSCALE_UNIT_CAPACITY=...)\n";
-    return 2;
-  }
-
+template <typename NetT>
+static int RunBench(bench::CliArgs &Args, size_t Neurons, uint32_t NIn,
+                    uint32_t Fanin, size_t Steps, bool MultiDevice) {
   bench::MemoryProbe MP;
   MP.Start();
   // No external dataset — the input stream is generated per step below.
   MP.EndDataset();
 
   std::cout << "[info] neurons=" << Neurons << " inputs=" << NIn
-            << " fanin=" << Fanin << " steps=" << Steps << "\n";
+            << " fanin=" << Fanin << " steps=" << Steps
+            << " MultiDevice=" << (MultiDevice ? "yes" : "no") << "\n";
 
   auto InputInit = [](auto &U, size_t Id) {
     plastix::GetField<IsOutputTag>(U, Id) = 0;
   };
-  Net Network(NIn, InputInit, ScaleBuilder{Neurons, NIn, Fanin, 0x1234ull + Args.Seed});
+  NetT Network(NIn, InputInit,
+               ScaleBuilder{Neurons, NIn, Fanin, 0x1234ull + Args.Seed});
   MP.EndWeights();
+
+#ifdef PLASTIX_HAS_CUDA
+  if (MultiDevice) {
+    Network.SetExecutor(std::make_unique<plastix::MultiDeviceExecutor>(2));
+    std::cout << "[info] executor: MultiDeviceExecutor(2)\n";
+  }
+#else
+  if (MultiDevice) {
+    std::cerr << "[fatal] --multi-device requires PLASTIX_HAS_CUDA\n";
+    return 2;
+  }
+#endif
 
   auto &UA = Network.GetUnitAlloc();
   auto &CA = Network.GetConnAlloc();
@@ -296,4 +310,31 @@ int main(int Argc, char **Argv) {
             << "\n";
   (void)LogPath;
   return 0;
+}
+
+} // namespace
+
+int main(int Argc, char **Argv) {
+  auto Args = bench::CliArgs::Parse(Argc, Argv);
+
+  size_t Neurons = static_cast<size_t>(Args.GetInt("neurons", 10000));
+  uint32_t NIn = static_cast<uint32_t>(Args.GetInt("inputs", 64));
+  uint32_t Fanin = static_cast<uint32_t>(Args.GetInt("fanin", 4));
+  size_t Steps = static_cast<size_t>(Args.GetInt("steps", 500));
+  if (Args.Quick) {
+    Neurons = std::min<size_t>(Neurons, 20000);
+    Steps = std::min<size_t>(Steps, 100);
+  }
+  Neurons = std::max<size_t>(Neurons, NIn + 2);
+  if (Neurons > Traits::UnitCapacity) {
+    std::cerr << "[err] neurons=" << Neurons << " exceeds compile-time "
+              << "UnitCapacity=" << Traits::UnitCapacity
+              << " (rebuild with -DSCALE_UNIT_CAPACITY=...)\n";
+    return 2;
+  }
+
+  const bool MultiDevice = Args.GetBool("multi-device", false);
+  if (MultiDevice)
+    return RunBench<NetSharded>(Args, Neurons, NIn, Fanin, Steps, true);
+  return RunBench<Net>(Args, Neurons, NIn, Fanin, Steps, false);
 }

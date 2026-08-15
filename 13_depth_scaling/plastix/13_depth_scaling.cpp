@@ -122,6 +122,25 @@ struct Traits : plastix::DefaultNetworkTraits<Globals> {
 static_assert(plastix::NetworkTraits<Traits>);
 using Net = plastix::Network<Traits>;
 
+// Two-shard policy for the multi-GPU variant: level 0 (input units) on
+// shard 0, every deeper level on shard 1. Same policy bench 01 uses; the
+// plastix library routes Pipeline+sharded through the Topological sharded
+// dispatchers (level-serialized shortcut, see plastix.hpp).
+struct TwoShardOnLevel1 {
+  static constexpr uint16_t NumShards = 2;
+  static constexpr bool IsContiguousByLevel = true;
+  static constexpr plastix::ShardId Assign(uint32_t, uint16_t Level) {
+    return plastix::ShardId{Level == 0 ? uint16_t{0} : uint16_t{1}};
+  }
+};
+
+struct TraitsSharded : Traits {
+  using Sharding = TwoShardOnLevel1;
+};
+static_assert(plastix::NetworkTraits<TraitsSharded>);
+
+using NetSharded = plastix::Network<TraitsSharded>;
+
 struct Lcg {
   uint64_t State;
   explicit Lcg(uint64_t Seed) : State(Seed ? Seed : 0x9E3779B97F4A7C15ull) {}
@@ -208,42 +227,40 @@ struct DepthBuilder {
   }
 };
 
-} // namespace
-
-int main(int Argc, char **Argv) {
-  auto Args = bench::CliArgs::Parse(Argc, Argv);
-
-  size_t Neurons = static_cast<size_t>(Args.GetInt("neurons", 100000));
-  uint32_t NIn = static_cast<uint32_t>(Args.GetInt("inputs", 64));
-  uint32_t Fanin = static_cast<uint32_t>(Args.GetInt("fanin", 4));
-  uint32_t Depth = static_cast<uint32_t>(Args.GetInt("depth", 8));
-  size_t Steps = static_cast<size_t>(Args.GetInt("steps", 200));
-  if (Args.Quick) {
-    Neurons = std::min<size_t>(Neurons, 20000);
-    Steps = std::min<size_t>(Steps, 100);
-  }
-  Neurons = std::max<size_t>(Neurons, NIn + Depth + 1);
-  if (Neurons > Traits::UnitCapacity) {
-    std::cerr << "[err] neurons=" << Neurons << " exceeds compile-time "
-              << "UnitCapacity=" << Traits::UnitCapacity
-              << " (rebuild with -DSCALE_UNIT_CAPACITY=...)\n";
-    return 2;
-  }
-
+// Templated body: instantiated with Net (single-device) or NetSharded
+// (2 shards, MultiDeviceExecutor). MultiDevice=true attaches the
+// MultiDeviceExecutor after construction.
+template <typename NetT>
+static int RunBench(bench::CliArgs &Args, size_t Neurons, uint32_t NIn,
+                    uint32_t Fanin, uint32_t Depth, size_t Steps,
+                    bool MultiDevice) {
   bench::MemoryProbe MP;
   MP.Start();
   MP.EndDataset();
 
   std::cout << "[info] neurons=" << Neurons << " inputs=" << NIn
             << " fanin=" << Fanin << " depth=" << Depth << " steps=" << Steps
-            << "\n";
+            << " MultiDevice=" << (MultiDevice ? "yes" : "no") << "\n";
 
   auto InputInit = [](auto &U, size_t Id) {
     plastix::GetField<IsOutputTag>(U, Id) = 0;
   };
-  Net Network(NIn, InputInit,
-              DepthBuilder{Neurons, NIn, Fanin, Depth, 0x1234ull + Args.Seed});
+  NetT Network(NIn, InputInit,
+               DepthBuilder{Neurons, NIn, Fanin, Depth,
+                            0x1234ull + Args.Seed});
   MP.EndWeights();
+
+#ifdef PLASTIX_HAS_CUDA
+  if (MultiDevice) {
+    Network.SetExecutor(std::make_unique<plastix::MultiDeviceExecutor>(2));
+    std::cout << "[info] executor: MultiDeviceExecutor(2)\n";
+  }
+#else
+  if (MultiDevice) {
+    std::cerr << "[fatal] --multi-device requires PLASTIX_HAS_CUDA\n";
+    return 2;
+  }
+#endif
 
   auto &UA = Network.GetUnitAlloc();
   auto &CA = Network.GetConnAlloc();
@@ -322,4 +339,33 @@ int main(int Argc, char **Argv) {
             << "\n";
   (void)LogPath;
   return 0;
+}
+
+} // namespace
+
+int main(int Argc, char **Argv) {
+  auto Args = bench::CliArgs::Parse(Argc, Argv);
+
+  size_t Neurons = static_cast<size_t>(Args.GetInt("neurons", 100000));
+  uint32_t NIn = static_cast<uint32_t>(Args.GetInt("inputs", 64));
+  uint32_t Fanin = static_cast<uint32_t>(Args.GetInt("fanin", 4));
+  uint32_t Depth = static_cast<uint32_t>(Args.GetInt("depth", 8));
+  size_t Steps = static_cast<size_t>(Args.GetInt("steps", 200));
+  if (Args.Quick) {
+    Neurons = std::min<size_t>(Neurons, 20000);
+    Steps = std::min<size_t>(Steps, 100);
+  }
+  Neurons = std::max<size_t>(Neurons, NIn + Depth + 1);
+  if (Neurons > Traits::UnitCapacity) {
+    std::cerr << "[err] neurons=" << Neurons << " exceeds compile-time "
+              << "UnitCapacity=" << Traits::UnitCapacity
+              << " (rebuild with -DSCALE_UNIT_CAPACITY=...)\n";
+    return 2;
+  }
+
+  const bool MultiDevice = Args.GetBool("multi-device", false);
+  if (MultiDevice) {
+    return RunBench<NetSharded>(Args, Neurons, NIn, Fanin, Depth, Steps, true);
+  }
+  return RunBench<Net>(Args, Neurons, NIn, Fanin, Depth, Steps, false);
 }
