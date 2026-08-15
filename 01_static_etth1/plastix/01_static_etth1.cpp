@@ -140,6 +140,30 @@ static_assert(plastix::NetworkTraits<StaticTraits>);
 
 using Net = plastix::Network<StaticTraits>;
 
+// Two-shard policy for the multi-GPU variant: level 0 (input units) on
+// shard 0, every deeper level on shard 1. Same shape as
+// tests/test_nccl_executor.cpp -- IsContiguousByLevel keeps the mapping
+// dispatch-friendly, since Assign() is a pure level->shard function so
+// each shard owns a contiguous level range.
+struct TwoShardOnLevel1 {
+  static constexpr uint16_t NumShards = 2;
+  static constexpr bool IsContiguousByLevel = true;
+  static constexpr plastix::ShardId Assign(uint32_t, uint16_t Level) {
+    return plastix::ShardId{Level == 0 ? uint16_t{0} : uint16_t{1}};
+  }
+};
+
+// Sharded traits: identical to StaticTraits except for the sharding
+// policy. Constructed as a separate type so the same source can build
+// both the single-device Net and a MultiDeviceExecutor-backed NetSharded
+// and main() dispatches at runtime on --multi-device.
+struct StaticTraitsSharded : StaticTraits {
+  using Sharding = TwoShardOnLevel1;
+};
+static_assert(plastix::NetworkTraits<StaticTraitsSharded>);
+
+using NetSharded = plastix::Network<StaticTraitsSharded>;
+
 struct UniformInit {
   uint64_t Seed;
   float Limit;
@@ -283,7 +307,8 @@ static Dataset Window(const Series &S, size_t InLen, size_t OutLen) {
   return D;
 }
 
-static double EvalMse(Net &N, const std::vector<std::vector<float>> &X,
+template <typename NetT>
+static double EvalMse(NetT &N, const std::vector<std::vector<float>> &X,
                       const std::vector<std::vector<float>> &Y) {
   double Sum = 0.0;
   size_t Cnt = 0;
@@ -307,25 +332,31 @@ using FCOut = plastix::FullyConnected<UniformInit, MarkOutput>;
 // So Depth=1 = single readout, Depth=2 = 1 hidden + 1 out, Depth=3 = 2
 // hidden + 1 out, etc. We pass InDim and OutDim explicitly (the network's
 // input dimension is multivariate in_len * channels).
-static std::unique_ptr<Net> BuildNetwork(size_t InDim, size_t OutDim,
-                                          const HP &H, uint64_t SeedBase,
-                                          float Limit) {
+//
+// Templated on the network type so the same builder works for both the
+// single-device Net and the two-shard NetSharded -- the topology is the
+// same either way; only the executor differs (attached after construction
+// by the caller when --multi-device is on).
+template <typename NetT>
+static std::unique_ptr<NetT> BuildNetworkT(size_t InDim, size_t OutDim,
+                                            const HP &H, uint64_t SeedBase,
+                                            float Limit) {
   if (H.Depth == 1) {
-    return std::unique_ptr<Net>(new Net(
+    return std::unique_ptr<NetT>(new NetT(
         InDim, FCOut{OutDim, UniformInit{SeedBase + 1, Limit}, MarkOutput{}}));
   } else if (H.Depth == 2) {
-    return std::unique_ptr<Net>(new Net(
+    return std::unique_ptr<NetT>(new NetT(
         InDim, FCHidden{H.Hidden, UniformInit{SeedBase + 1, Limit}},
         FCOut{OutDim, UniformInit{SeedBase + 2, Limit}, MarkOutput{}}));
   } else if (H.Depth == 4) {
-    return std::unique_ptr<Net>(new Net(
+    return std::unique_ptr<NetT>(new NetT(
         InDim, FCHidden{H.Hidden, UniformInit{SeedBase + 1, Limit}},
         FCHidden{H.Hidden, UniformInit{SeedBase + 2, Limit}},
         FCHidden{H.Hidden, UniformInit{SeedBase + 4, Limit}},
         FCOut{OutDim, UniformInit{SeedBase + 3, Limit}, MarkOutput{}}));
   }
-  // depth 3 — the PyTorch default.
-  return std::unique_ptr<Net>(new Net(
+  // depth 3 -- the PyTorch default.
+  return std::unique_ptr<NetT>(new NetT(
       InDim, FCHidden{H.Hidden, UniformInit{SeedBase + 1, Limit}},
       FCHidden{H.Hidden, UniformInit{SeedBase + 2, Limit}},
       FCOut{OutDim, UniformInit{SeedBase + 3, Limit}, MarkOutput{}}));
@@ -333,23 +364,15 @@ static std::unique_ptr<Net> BuildNetwork(size_t InDim, size_t OutDim,
 
 } // namespace
 
-int main(int Argc, char **Argv) {
-  auto Args = bench::CliArgs::Parse(Argc, Argv);
+namespace {
 
-  HP H;
-  H.InLen = static_cast<size_t>(Args.GetInt("in-len", H.InLen));
-  H.OutLen = static_cast<size_t>(Args.GetInt("out-len", H.OutLen));
-  H.Hidden = static_cast<size_t>(Args.GetInt("hidden", H.Hidden));
-  H.Depth = static_cast<size_t>(Args.GetInt("depth", H.Depth));
-  H.Epochs = static_cast<size_t>(Args.GetInt("epochs", H.Epochs));
-  H.Lr = Args.GetFloat("lr", H.Lr);
-  H.MaxTrainRows = static_cast<size_t>(
-      Args.GetInt("max-train-rows", static_cast<int>(H.MaxTrainRows)));
-  if (Args.Quick) {
-    // PyTorch reference: epochs //= 4 in quick mode. Match that here.
-    H.Epochs = std::max<size_t>(1, H.Epochs / 4);
-  }
-
+// Templated body of the benchmark. Instantiated with either Net (single
+// device, historical path) or NetSharded (2 shards, MultiDeviceExecutor).
+// MultiDevice=true triggers the SetExecutor call after network construction;
+// everything else is identical -- the whole point of the sharded API is that
+// the training-loop dispatch code is the same regardless of executor.
+template <typename NetT>
+static int RunBench(bench::CliArgs &Args, HP &H, bool MultiDevice) {
   bench::MemoryProbe MP;
   MP.Start();
 
@@ -370,12 +393,27 @@ int main(int Argc, char **Argv) {
             << " Channels=" << Raw.C << " InDim=" << InDim << " OutDim="
             << OutDim << " Hidden=" << H.Hidden << " Depth=" << H.Depth
             << " Epochs=" << H.Epochs << " Train=" << NTr << " Val=" << NVa
-            << "\n";
+            << " MultiDevice=" << (MultiDevice ? "yes" : "no") << "\n";
 
   float Limit = std::sqrt(6.0f / static_cast<float>(InDim + H.Hidden));
   uint64_t SeedBase = static_cast<uint64_t>(Args.Seed) * 1000ull + 7ull;
-  auto N = BuildNetwork(InDim, OutDim, H, SeedBase, Limit);
+  auto N = BuildNetworkT<NetT>(InDim, OutDim, H, SeedBase, Limit);
   MP.EndWeights();
+
+#ifdef PLASTIX_HAS_CUDA
+  if (MultiDevice) {
+    // Two-shard MultiDeviceExecutor. Requires two visible CUDA devices;
+    // the sbatch that runs this must request --gpus-per-node=a100:2.
+    N->SetExecutor(std::make_unique<plastix::MultiDeviceExecutor>(2));
+    std::cout << "[info] executor: MultiDeviceExecutor(2)\n";
+  }
+#else
+  if (MultiDevice) {
+    std::cerr << "[fatal] --multi-device requires a CUDA-enabled build "
+                 "(PLASTIX_BENCH_ENABLE_CUDA=ON)\n";
+    return 2;
+  }
+#endif
   // Stage the learning rate into the managed GlobalState; the UpdateConn
   // policy reads it on host or device through its Globals handle.
   N->Global().Lr = H.Lr;
@@ -487,4 +525,30 @@ int main(int Argc, char **Argv) {
 
   (void)LogPath;
   return 0;
+}
+
+} // namespace (RunBench template)
+
+int main(int Argc, char **Argv) {
+  auto Args = bench::CliArgs::Parse(Argc, Argv);
+
+  HP H;
+  H.InLen = static_cast<size_t>(Args.GetInt("in-len", H.InLen));
+  H.OutLen = static_cast<size_t>(Args.GetInt("out-len", H.OutLen));
+  H.Hidden = static_cast<size_t>(Args.GetInt("hidden", H.Hidden));
+  H.Depth = static_cast<size_t>(Args.GetInt("depth", H.Depth));
+  H.Epochs = static_cast<size_t>(Args.GetInt("epochs", H.Epochs));
+  H.Lr = Args.GetFloat("lr", H.Lr);
+  H.MaxTrainRows = static_cast<size_t>(
+      Args.GetInt("max-train-rows", static_cast<int>(H.MaxTrainRows)));
+  if (Args.Quick) {
+    // PyTorch reference: epochs //= 4 in quick mode. Match that here.
+    H.Epochs = std::max<size_t>(1, H.Epochs / 4);
+  }
+
+  const bool MultiDevice = Args.GetBool("multi-device", false);
+  if (MultiDevice) {
+    return RunBench<NetSharded>(Args, H, true);
+  }
+  return RunBench<Net>(Args, H, false);
 }
