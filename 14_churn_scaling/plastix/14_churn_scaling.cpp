@@ -146,6 +146,24 @@ struct Traits : plastix::DefaultNetworkTraits<Globals> {
 };
 using Net = plastix::Network<Traits>;
 
+// Level-parallel two-shard policy. Pipeline sharded routes through
+// the Topological sharded shortcut in plastix.hpp; connection mutations
+// (DoPrune/Compact/AddConnections here) trigger a resort under the
+// extended NeedsResort gates.
+struct TwoShardOnLevel1 {
+  static constexpr uint16_t NumShards = 2;
+  static constexpr bool IsContiguousByLevel = true;
+  static constexpr plastix::ShardId Assign(uint32_t, uint16_t Level) {
+    return plastix::ShardId{Level == 0 ? uint16_t{0} : uint16_t{1}};
+  }
+};
+
+struct TraitsSharded : Traits {
+  using Sharding = TwoShardOnLevel1;
+};
+
+using NetSharded = plastix::Network<TraitsSharded>;
+
 struct Lcg {
   uint64_t State;
   explicit Lcg(uint64_t S) : State(S ? S : 0x9E3779B97F4A7C15ull) {}
@@ -216,22 +234,23 @@ struct DepthBuilder {
   }
 };
 
-} // namespace
-
-int main(int Argc, char **Argv) {
-  auto Args = bench::CliArgs::Parse(Argc, Argv);
-  size_t Neurons = static_cast<size_t>(Args.GetInt("neurons", 100000));
-  uint32_t NIn = static_cast<uint32_t>(Args.GetInt("inputs", 64));
-  uint32_t Fanin = static_cast<uint32_t>(Args.GetInt("fanin", 4));
-  uint32_t Depth = static_cast<uint32_t>(Args.GetInt("depth", 4));
-  size_t Steps = static_cast<size_t>(Args.GetInt("steps", 20));
-  Neurons = std::max<size_t>(Neurons, NIn + Depth + 1);
-
+template <typename NetT>
+static int RunBench(bench::CliArgs &Args, size_t Neurons, uint32_t NIn,
+                    uint32_t Fanin, uint32_t Depth, size_t Steps,
+                    bool MultiDevice) {
   auto InputInit = [](auto &U, size_t Id) {
     plastix::GetField<IsOutputTag>(U, Id) = 0;
   };
-  Net Network(NIn, InputInit,
-              DepthBuilder{Neurons, NIn, Fanin, Depth, 0x1234ull + Args.Seed});
+  NetT Network(NIn, InputInit,
+               DepthBuilder{Neurons, NIn, Fanin, Depth, 0x1234ull + Args.Seed});
+#ifdef PLASTIX_HAS_CUDA
+  if (MultiDevice) {
+    Network.SetExecutor(std::make_unique<plastix::MultiDeviceExecutor>(2));
+    std::cout << "[info] executor: MultiDeviceExecutor(2)\n";
+  }
+#else
+  (void)MultiDevice;
+#endif
 
   std::vector<float> Features(NIn, 0.0f);
   std::array<float, 1> TargetBuf{0.0f};
@@ -287,6 +306,24 @@ int main(int Argc, char **Argv) {
             << " throughput_sps=" << (MeanNs > 0 ? 1e9 / MeanNs : 0) << "\n";
   std::cout << "[phases] fwd=" << PhFwd / C << " upd=" << PhUpd / C
             << " prune=" << PhPrune / C << " compact=" << PhCompact / C
-            << " add=" << PhAdd / C << "\n";
+            << " add=" << PhAdd / C
+            << " multi_device=" << (MultiDevice ? "yes" : "no") << "\n";
   return 0;
+}
+
+} // namespace
+
+int main(int Argc, char **Argv) {
+  auto Args = bench::CliArgs::Parse(Argc, Argv);
+  size_t Neurons = static_cast<size_t>(Args.GetInt("neurons", 100000));
+  uint32_t NIn = static_cast<uint32_t>(Args.GetInt("inputs", 64));
+  uint32_t Fanin = static_cast<uint32_t>(Args.GetInt("fanin", 4));
+  uint32_t Depth = static_cast<uint32_t>(Args.GetInt("depth", 4));
+  size_t Steps = static_cast<size_t>(Args.GetInt("steps", 20));
+  Neurons = std::max<size_t>(Neurons, NIn + Depth + 1);
+
+  const bool MultiDevice = Args.GetBool("multi-device", false);
+  if (MultiDevice)
+    return RunBench<NetSharded>(Args, Neurons, NIn, Fanin, Depth, Steps, true);
+  return RunBench<Net>(Args, Neurons, NIn, Fanin, Depth, Steps, false);
 }

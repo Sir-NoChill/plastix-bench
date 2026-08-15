@@ -153,6 +153,20 @@ struct Traits : plastix::DefaultNetworkTraits<Globals> {
 static_assert(plastix::NetworkTraits<Traits>);
 using Net = plastix::Network<Traits>;
 
+struct TwoShardOnLevel1 {
+  static constexpr uint16_t NumShards = 2;
+  static constexpr bool IsContiguousByLevel = true;
+  static constexpr plastix::ShardId Assign(uint32_t, uint16_t Level) {
+    return plastix::ShardId{Level == 0 ? uint16_t{0} : uint16_t{1}};
+  }
+};
+
+struct TraitsSharded : Traits {
+  using Sharding = TwoShardOnLevel1;
+};
+
+using NetSharded = plastix::Network<TraitsSharded>;
+
 // --- shared LCG (README §"Shared LCG") --------------------------------------
 struct Lcg {
   uint64_t State;
@@ -280,46 +294,32 @@ struct HP {
 
 } // namespace
 
-int main(int Argc, char **Argv) {
-  auto Args = bench::CliArgs::Parse(Argc, Argv);
+namespace {
 
-  HP H;
-  H.MaxSteps = static_cast<size_t>(Args.GetInt("max-steps", H.MaxSteps));
-  H.LogEvery = static_cast<size_t>(Args.GetInt("log-every", H.LogEvery));
-  if (Args.Quick) {
-    H.MaxSteps = std::min<size_t>(H.MaxSteps, 2000);
-    H.LogEvery = std::min<size_t>(H.LogEvery, 200);
-  }
-
-  bench::MemoryProbe MP;
-  MP.Start();
-
-  auto TopoPath = ResolveTopology(Args);
-  if (TopoPath.empty()) {
-    std::cerr << "[err] topology.bin not found (looked in --data-dir and "
-                 "10_engineered_sparse_large_nn/).\n";
-    return 2;
-  }
-
-  Topology Topo;
-  if (!LoadTopology(TopoPath, Topo)) {
-    std::cerr << "[err] failed to read " << TopoPath << "\n";
-    return 2;
-  }
-  MP.EndDataset();
-
+template <typename NetT>
+static int RunBench(bench::CliArgs &Args, HP &H, Topology &Topo,
+                    bench::MemoryProbe &MP, bool MultiDevice) {
   size_t N = std::min<size_t>(H.MaxSteps, Topo.NSteps);
   size_t RecW = static_cast<size_t>(Topo.NIn) + 1;
 
-  std::cout << "[info] topology=" << TopoPath.string() << " units="
-            << Topo.NUnits << " edges=" << Topo.NEdges << " steps="
-            << Topo.NSteps << " using=" << N << " output_id=" << Topo.OutputId
-            << " quick=" << (Args.Quick ? 1 : 0) << "\n";
+  std::cout << "[info] units=" << Topo.NUnits << " edges=" << Topo.NEdges
+            << " steps=" << Topo.NSteps << " using=" << N
+            << " output_id=" << Topo.OutputId
+            << " quick=" << (Args.Quick ? 1 : 0)
+            << " MultiDevice=" << (MultiDevice ? "yes" : "no") << "\n";
 
   auto InputInit = [](auto &U, size_t Id) {
     plastix::GetField<IsOutputTag>(U, Id) = 0;
   };
-  Net Network(Topo.NIn, InputInit, TopologyBuilder{&Topo});
+  NetT Network(Topo.NIn, InputInit, TopologyBuilder{&Topo});
+#ifdef PLASTIX_HAS_CUDA
+  if (MultiDevice) {
+    Network.SetExecutor(std::make_unique<plastix::MultiDeviceExecutor>(2));
+    std::cout << "[info] executor: MultiDeviceExecutor(2)\n";
+  }
+#else
+  (void)MultiDevice;
+#endif
 
   auto &UA = Network.GetUnitAlloc();
   auto &CA = Network.GetConnAlloc();
@@ -500,4 +500,40 @@ int main(int Argc, char **Argv) {
 
   (void)LogPath;
   return 0;
+}
+
+} // namespace (RunBench template)
+
+int main(int Argc, char **Argv) {
+  auto Args = bench::CliArgs::Parse(Argc, Argv);
+
+  HP H;
+  H.MaxSteps = static_cast<size_t>(Args.GetInt("max-steps", H.MaxSteps));
+  H.LogEvery = static_cast<size_t>(Args.GetInt("log-every", H.LogEvery));
+  if (Args.Quick) {
+    H.MaxSteps = std::min<size_t>(H.MaxSteps, 2000);
+    H.LogEvery = std::min<size_t>(H.LogEvery, 200);
+  }
+
+  bench::MemoryProbe MP;
+  MP.Start();
+
+  auto TopoPath = ResolveTopology(Args);
+  if (TopoPath.empty()) {
+    std::cerr << "[err] topology.bin not found (looked in --data-dir and "
+                 "10_engineered_sparse_large_nn/).\n";
+    return 2;
+  }
+  Topology Topo;
+  if (!LoadTopology(TopoPath, Topo)) {
+    std::cerr << "[err] failed to read " << TopoPath << "\n";
+    return 2;
+  }
+  MP.EndDataset();
+  std::cout << "[info] topology=" << TopoPath.string() << "\n";
+
+  const bool MultiDevice = Args.GetBool("multi-device", false);
+  if (MultiDevice)
+    return RunBench<NetSharded>(Args, H, Topo, MP, true);
+  return RunBench<Net>(Args, H, Topo, MP, false);
 }

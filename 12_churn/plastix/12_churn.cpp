@@ -77,6 +77,16 @@ struct AddConn {
   }
 };
 
+// Level-parallel two-shard policy (shared with bench 01/11/13). Pipeline
+// sharded routes through the Topological sharded shortcut in plastix.hpp.
+struct TwoShardOnLevel1 {
+  static constexpr uint16_t NumShards = 2;
+  static constexpr bool IsContiguousByLevel = true;
+  static constexpr plastix::ShardId Assign(uint32_t, uint16_t Level) {
+    return plastix::ShardId{Level == 0 ? uint16_t{0} : uint16_t{1}};
+  }
+};
+
 template <uint32_t K> struct TraitsT : plastix::DefaultNetworkTraits<GlobalsT<K>> {
   using ForwardPass = Forward;
   using AddConn = ::AddConn;
@@ -172,14 +182,24 @@ struct DepthBuilder {
   }
 };
 
-template <uint32_t K>
-void RunOne(size_t Neurons, uint32_t NIn, uint32_t Fanin, uint32_t Depth,
-            uint64_t Seed) {
-  using Net = plastix::Network<TraitsT<K>>;
+// Sharded traits variant of TraitsT<K>.
+template <uint32_t K> struct TraitsShardedT : TraitsT<K> {
+  using Sharding = TwoShardOnLevel1;
+};
+
+template <typename NetT, uint32_t K>
+void RunOneT(size_t Neurons, uint32_t NIn, uint32_t Fanin, uint32_t Depth,
+             uint64_t Seed, bool MultiDevice) {
   auto InputInit = [](auto &U, size_t Id) {
     plastix::GetField<IsOutputTag>(U, Id) = 0;
   };
-  Net Network(NIn, InputInit, DepthBuilder{Neurons, NIn, Fanin, Depth, Seed});
+  NetT Network(NIn, InputInit, DepthBuilder{Neurons, NIn, Fanin, Depth, Seed});
+#ifdef PLASTIX_HAS_CUDA
+  if (MultiDevice)
+    Network.SetExecutor(std::make_unique<plastix::MultiDeviceExecutor>(2));
+#else
+  (void)MultiDevice;
+#endif
   size_t Before = bench::LiveEdgeCount(Network.GetConnAlloc());
 
   auto T0 = std::chrono::steady_clock::now();
@@ -205,7 +225,20 @@ void RunOne(size_t Neurons, uint32_t NIn, uint32_t Fanin, uint32_t Depth,
   std::cout << "[add] neurons=" << Neurons << " depth=" << Depth << " k=" << K
             << " edges_before=" << Before << " edges_after=" << After
             << " added=" << (After - Before) << " add_ns=" << AddNs
-            << " edgesum=" << Sum << " edgexor=" << Xor << "\n";
+            << " edgesum=" << Sum << " edgexor=" << Xor
+            << " multi_device=" << (MultiDevice ? "yes" : "no") << "\n";
+}
+
+template <uint32_t K>
+void RunOne(size_t Neurons, uint32_t NIn, uint32_t Fanin, uint32_t Depth,
+            uint64_t Seed, bool MultiDevice) {
+  if (MultiDevice) {
+    RunOneT<plastix::Network<TraitsShardedT<K>>, K>(Neurons, NIn, Fanin, Depth,
+                                                     Seed, true);
+  } else {
+    RunOneT<plastix::Network<TraitsT<K>>, K>(Neurons, NIn, Fanin, Depth, Seed,
+                                              false);
+  }
 }
 
 } // namespace
@@ -220,9 +253,10 @@ int main(int Argc, char **Argv) {
   uint64_t Seed = 0x1234ull + static_cast<uint64_t>(Args.Seed);
   Neurons = std::max<size_t>(Neurons, NIn + Depth + 1);
 
+  const bool MultiDevice = Args.GetBool("multi-device", false);
   if (GrowK == 0)
-    RunOne<0>(Neurons, NIn, Fanin, Depth, Seed);
+    RunOne<0>(Neurons, NIn, Fanin, Depth, Seed, MultiDevice);
   else
-    RunOne<SAMPLE_K>(Neurons, NIn, Fanin, Depth, Seed);
+    RunOne<SAMPLE_K>(Neurons, NIn, Fanin, Depth, Seed, MultiDevice);
   return 0;
 }
