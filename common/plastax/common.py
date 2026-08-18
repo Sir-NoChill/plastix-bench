@@ -25,6 +25,7 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 # Reuse the jax common (which itself re-exports the framework-agnostic pytorch
 # helpers). Loaded by explicit path under a unique name so it doesn't collide
@@ -48,8 +49,18 @@ plot_run = _jaxc.plot_run                        # noqa: F401
 test_plot_path = _jaxc.test_plot_path            # noqa: F401
 
 import plastax as px  # noqa: E402
-from plastax._types import ACTIVATION  # noqa: E402
+from plastax._types import (  # noqa: E402
+    ACTIVATION,
+    DEAD,
+    FROM_ID,
+    LEVEL,
+    TO_ID,
+    WEIGHT,
+    Propagation,
+)
 from plastax.phases import build_phases  # noqa: E402
+from plastax.state import NetworkState, NetworkStatic  # noqa: E402
+from plastax.topo import capacity_policy  # noqa: E402
 
 # build_phases order (phases.py): forward, loss, backward, update_conn,
 # prune_conn, add_conn, reset_global. Map each present slot to its PhaseTimer
@@ -161,3 +172,115 @@ def run_phase_timed_step(runners: dict, state, step_inputs, timer) -> tuple:
         timer.mark_reset(state)
     timer.step_done()
     return state, loss
+
+
+def build_pipeline_state(
+    net,
+    *,
+    num_units: int,
+    input_ids,
+    output_ids,
+    from_ids,
+    to_ids,
+    weights,
+    activation_init=None,
+    level_of=None,
+    extra_conn_cols=None,
+    extra_unit_cols=None,
+    globals_=None,
+    capacity: int | None = None,
+):
+    """Custom PIPELINE-mode builder for RECURRENT (cyclic) topologies — the
+    plastax analogue of the native C++ ReservoirBuilder / NCPWiringBuilder.
+
+    NetworkBuilder.finalize computes host-side longest-path levels
+    (topo.initial_levels) and RAISES on any cycle, so the standard builder
+    cannot construct a reservoir (07) or NCP wiring (06). In PIPELINE mode
+    levels are only tags — the flat sweep ignores them — so this mirrors
+    finalize's PIPELINE branch (one flat bucket, live edges sorted by
+    (dead, to_id) for the sweep's indices_are_sorted=True contract, dead
+    padding to capacity) while assigning levels manually (inputs 0, all
+    other units 1, unless `level_of` overrides).
+
+    from_ids/to_ids/weights are the LIVE edge list. extra_conn_cols /
+    extra_unit_cols supply initial values for the net's extra columns
+    (keyed by FieldSpec.name); anything omitted gets the spec default.
+    Returns (NetworkStatic, NetworkState) ready for build_phase_runners /
+    px.make_step, exactly like NetworkBuilder.from_topology.
+    """
+    unit_fields = (ACTIVATION, LEVEL, *net.extra_unit_fields)
+    conn_fields = (FROM_ID, TO_ID, DEAD, WEIGHT, *net.extra_conn_fields)
+
+    from_ids = np.asarray(from_ids, dtype=np.int32)
+    to_ids = np.asarray(to_ids, dtype=np.int32)
+    weights = np.asarray(weights, dtype=np.float32)
+    n_edges = int(from_ids.shape[0])
+    # (dead, to_id) order == live-first, sorted by to_id: exactly the layout
+    # the PIPELINE forward sweep's indices_are_sorted=True segment-reduce needs.
+    order = np.argsort(to_ids, kind="stable")
+
+    cap = int(capacity) if capacity is not None else capacity_policy(n_edges)
+    if cap < n_edges:
+        raise ValueError(f"build_pipeline_state: capacity {cap} < n_edges {n_edges}")
+    pad = cap - n_edges
+
+    def _pad_live(live_vals, default, dtype):
+        arr = np.concatenate(
+            [np.asarray(live_vals, dtype=dtype), np.full((pad,), default, dtype=dtype)]
+        )
+        return jnp.asarray(arr, dtype=dtype)
+
+    conns0: dict = {
+        FROM_ID.name: _pad_live(from_ids[order], 0, np.int32),
+        TO_ID.name: _pad_live(to_ids[order], 0, np.int32),
+        WEIGHT.name: _pad_live(weights[order], 0.0, np.float32),
+        DEAD.name: jnp.asarray(
+            np.concatenate([np.zeros(n_edges, np.bool_), np.ones(pad, np.bool_)])
+        ),
+    }
+    for spec in net.extra_conn_fields:
+        if extra_conn_cols and spec.name in extra_conn_cols:
+            live = np.asarray(extra_conn_cols[spec.name], dtype=spec.dtype)[order]
+        else:
+            live = np.full((n_edges,), spec.default, dtype=spec.dtype)
+        conns0[spec.name] = _pad_live(live, spec.default, spec.dtype)
+
+    if level_of is not None:
+        levels = np.asarray(level_of, dtype=np.int32)
+    else:
+        levels = np.ones(num_units, dtype=np.int32)
+        levels[np.asarray(input_ids, dtype=np.int32)] = 0
+
+    units: dict = {
+        ACTIVATION.name: (
+            jnp.zeros((num_units,), jnp.float32)
+            if activation_init is None
+            else jnp.asarray(activation_init, dtype=jnp.float32)
+        ),
+        LEVEL.name: jnp.asarray(levels, dtype=jnp.int32),
+    }
+    for spec in net.extra_unit_fields:
+        if extra_unit_cols and spec.name in extra_unit_cols:
+            units[spec.name] = jnp.asarray(extra_unit_cols[spec.name], dtype=spec.dtype)
+        else:
+            units[spec.name] = jnp.full(
+                (num_units,), np.asarray(spec.default), dtype=spec.dtype
+            )
+
+    static = NetworkStatic(
+        num_units=int(num_units),
+        propagation=Propagation.PIPELINE,
+        unit_fields=unit_fields,
+        conn_fields=conn_fields,
+        level_capacities=(cap,),
+        kahn_max_depth=None,
+        input_ids=tuple(int(i) for i in input_ids),
+        output_ids=tuple(int(i) for i in output_ids),
+    )
+    state = NetworkState(
+        units=units,
+        conns=(conns0,),
+        globals_=globals_,
+        needs_resort=jnp.bool_(False),
+    )
+    return static, state
