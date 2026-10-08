@@ -21,13 +21,13 @@
 
 #include "plastix/common.hpp"
 
-#include <plastix/alloc.hpp>
-#include <plastix/conn.hpp>
-#include <plastix/layers.hpp>
-#include <plastix/macros.hpp>
-#include <plastix/plastix.hpp>
-#include <plastix/traits.hpp>
-#include <plastix/unit_state.hpp>
+#include <plastax/alloc.hpp>
+#include <plastax/conn.hpp>
+#include <plastax/layers.hpp>
+#include <plastax/macros.hpp>
+#include <plastax/plastax.hpp>
+#include <plastax/traits.hpp>
+#include <plastax/unit_state.hpp>
 
 #include <algorithm>
 #include <array>
@@ -54,37 +54,37 @@ struct Globals {
 
 struct Forward {
   using Accumulator = float;
-  PLASTIX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
+  PLASTAX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
                               size_t ConnId, auto &) {
-    return plastix::GetWeight(C, ConnId) * plastix::GetActivation(U, SrcId);
+    return plastax::GetWeight(C, ConnId) * plastax::GetActivation(U, SrcId);
   }
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &G, float Sum) {
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &G, float Sum) {
     float Out = std::tanh(Sum);
-    plastix::GetActivation(U, Id) = Out;
-    if (plastix::GetField<IsOutputTag>(U, Id))
+    plastax::GetActivation(U, Id) = Out;
+    if (plastax::GetField<IsOutputTag>(U, Id))
       G.V = Out;
   }
 };
 
 struct LossPolicy {
-  static void CalculateLoss(auto &, plastix::UnitRange,
+  static void CalculateLoss(auto &, plastax::UnitRange,
                             std::span<const float> Targets, Globals &G) {
     G.Delta = Targets[0] - G.V;
   }
 };
 
 struct ConnUpdate {
-  PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t, size_t SrcId,
+  PLASTAX_HD static void UpdateIncomingConnection(auto &U, size_t, size_t SrcId,
                                                   auto &C, size_t ConnId,
                                                   Globals &G) {
-    using namespace plastix;
+    using namespace plastax;
     float &W = GetWeight(C, ConnId);
     float &E = GetField<ETag>(C, ConnId);
     E = hp::Decay * E + GetActivation(U, SrcId);
     W += hp::LR * G.Delta * E;
   }
-  PLASTIX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t, auto &,
+  PLASTAX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t, auto &,
                                                   size_t, Globals &) {}
 };
 
@@ -92,7 +92,7 @@ struct ResetGlobalPolicy {
   static void Reset(auto &G) { G.Delta = 0.0f; }
 };
 
-struct Traits : plastix::DefaultNetworkTraits<Globals> {
+struct Traits : plastax::DefaultNetworkTraits<Globals> {
   using ForwardPass = Forward;
   using Loss = LossPolicy;
   using UpdateConn = ConnUpdate;
@@ -101,13 +101,13 @@ struct Traits : plastix::DefaultNetworkTraits<Globals> {
   static constexpr bool KernelizeAdd = false;
   static constexpr bool ReverseAdjForward = false;
 
-  using ExtraConnFields = plastix::ConnFieldList<
-      plastix::alloc::SOAField<plastix::WeightTag, float>,
-      plastix::alloc::SOAField<ETag, float>>;
-  using ExtraUnitFields = plastix::UnitFieldList<
-      plastix::alloc::SOAField<IsOutputTag, uint8_t>>;
+  using ExtraConnFields = plastax::ConnFieldList<
+      plastax::alloc::SOAField<plastax::WeightTag, float>,
+      plastax::alloc::SOAField<ETag, float>>;
+  using ExtraUnitFields = plastax::UnitFieldList<
+      plastax::alloc::SOAField<IsOutputTag, uint8_t>>;
 
-  static constexpr plastix::Propagation Model = plastix::Propagation::Pipeline;
+  static constexpr plastax::Propagation Model = plastax::Propagation::Pipeline;
 
   // Compiled once at a large capacity; mmap MAP_NORESERVE makes the headroom
   // free until written. `--neurons` allocates up to UnitCapacity at runtime.
@@ -123,8 +123,8 @@ struct Traits : plastix::DefaultNetworkTraits<Globals> {
   static constexpr size_t ConnCapacity = SCALE_CONN_CAPACITY;
 };
 
-static_assert(plastix::NetworkTraits<Traits>);
-using Net = plastix::Network<Traits>;
+static_assert(plastax::NetworkTraits<Traits>);
+using Net = plastax::Network<Traits>;
 
 struct Lcg {
   uint64_t State;
@@ -146,9 +146,9 @@ struct ScaleBuilder {
   uint64_t Seed;
 
   template <typename UnitAlloc, typename ConnAlloc>
-  PLASTIX_HOST plastix::UnitRange operator()(UnitAlloc &UA, ConnAlloc &CA,
-                                             plastix::UnitRange) const {
-    using namespace plastix;
+  PLASTAX_HOST plastax::UnitRange operator()(UnitAlloc &UA, ConnAlloc &CA,
+                                             plastax::UnitRange) const {
+    using namespace plastax;
     Lcg Rng(Seed);
     const uint32_t OutId = static_cast<uint32_t>(N - 1);
     for (size_t I = 0; I < NIn; ++I) {
@@ -213,7 +213,7 @@ int main(int Argc, char **Argv) {
             << " fanin=" << Fanin << " steps=" << Steps << "\n";
 
   auto InputInit = [](auto &U, size_t Id) {
-    plastix::GetField<IsOutputTag>(U, Id) = 0;
+    plastax::GetField<IsOutputTag>(U, Id) = 0;
   };
   Net Network(NIn, InputInit, ScaleBuilder{Neurons, NIn, Fanin, 0x1234ull + Args.Seed});
   MP.EndWeights();

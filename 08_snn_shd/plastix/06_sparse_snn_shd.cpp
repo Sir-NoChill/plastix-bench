@@ -30,9 +30,9 @@
 
 #include "plastix/common.hpp"
 
-#include <plastix/math.hpp>
-#include <plastix/plastix.hpp>
-#include <plastix/random.hpp>
+#include <plastax/math.hpp>
+#include <plastax/plastax.hpp>
+#include <plastax/random.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -107,34 +107,34 @@ struct EpropGlobals {
 struct LifForward {
   using Accumulator = float;
 
-  PLASTIX_HD static float Map(auto &U, size_t /*Self*/, size_t SrcId,
+  PLASTAX_HD static float Map(auto &U, size_t /*Self*/, size_t SrcId,
                               auto &C, size_t ConnId, auto &) {
-    return plastix::GetWeight(C, ConnId) * plastix::GetActivation(U, SrcId);
+    return plastax::GetWeight(C, ConnId) * plastax::GetActivation(U, SrcId);
   }
 
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
 
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &G, float I) {
-    bool IsOut = plastix::GetField<IsOutputTag>(U, Id);
-    float Beta = plastix::GetField<BetaTag>(U, Id);
-    float Thr = plastix::GetField<ThresholdTag>(U, Id);
-    float Mem = plastix::GetField<MembraneTag>(U, Id);
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &G, float I) {
+    bool IsOut = plastax::GetField<IsOutputTag>(U, Id);
+    float Beta = plastax::GetField<BetaTag>(U, Id);
+    float Thr = plastax::GetField<ThresholdTag>(U, Id);
+    float Mem = plastax::GetField<MembraneTag>(U, Id);
 
     if (IsOut) {
       // Non-spiking integrator: mem' = beta*mem + I, no reset.
       Mem = Beta * Mem + I;
-      plastix::GetField<MembraneTag>(U, Id) = Mem;
+      plastax::GetField<MembraneTag>(U, Id) = Mem;
       // Accumulate the mean (×LogitScale = 1/n_bins) so the final
       // LogitAcc literally is the per-step mean of mem_o, keeping the
       // softmax inputs in a sane range without needing a chain-rule
       // correction at loss time.
-      plastix::GetField<LogitAccTag>(U, Id) += Mem * G.LogitScale;
+      plastax::GetField<LogitAccTag>(U, Id) += Mem * G.LogitScale;
       // Output doesn't propagate forward; later layers (if any) would
       // see Activation=0. Backward Apply takes BackwardAcc as the
       // upstream signal, so Activation is unused.
-      plastix::GetActivation(U, Id) = 0.0f;
+      plastax::GetActivation(U, Id) = 0.0f;
       // Stash z so future readout-side surrogates could use it (none yet).
-      plastix::GetField<PreActTag>(U, Id) = Mem - Thr;
+      plastax::GetField<PreActTag>(U, Id) = Mem - Thr;
     } else {
       // Subtract-reset LIF matching snnTorch's default Leaky:
       //   mem  = beta*mem + I
@@ -144,9 +144,9 @@ struct LifForward {
       float Z = Mem - Thr;
       float Spk = (Z >= 0.0f) ? 1.0f : 0.0f;
       Mem -= Thr * Spk;
-      plastix::GetField<MembraneTag>(U, Id) = Mem;
-      plastix::GetField<PreActTag>(U, Id) = Z;
-      plastix::GetActivation(U, Id) = Spk;
+      plastax::GetField<MembraneTag>(U, Id) = Mem;
+      plastax::GetField<PreActTag>(U, Id) = Z;
+      plastax::GetActivation(U, Id) = Spk;
     }
   }
 };
@@ -155,7 +155,7 @@ struct LifForward {
 
 struct EpropLoss {
   template <typename UA>
-  static void CalculateLoss(UA &U, plastix::UnitRange Out,
+  static void CalculateLoss(UA &U, plastax::UnitRange Out,
                             std::span<const float> Target, auto &G) {
     if (!G.IsFinalStep || Target.empty())
       return;
@@ -165,21 +165,21 @@ struct EpropLoss {
     // range and no chain-rule correction is needed at loss time.
     float MaxL = -1e30f;
     for (size_t I = Out.Begin; I < Out.End; ++I) {
-      float L = plastix::GetField<LogitAccTag>(U, I);
+      float L = plastax::GetField<LogitAccTag>(U, I);
       if (L > MaxL)
         MaxL = L;
     }
     double Z = 0.0;
     for (size_t I = Out.Begin; I < Out.End; ++I)
-      Z += std::exp(plastix::GetField<LogitAccTag>(U, I) - MaxL);
+      Z += std::exp(plastax::GetField<LogitAccTag>(U, I) - MaxL);
 
     float Loss = 0.0f;
     for (size_t K = 0, I = Out.Begin; I < Out.End; ++I, ++K) {
       float P = static_cast<float>(
-          std::exp(plastix::GetField<LogitAccTag>(U, I) - MaxL) / Z);
+          std::exp(plastax::GetField<LogitAccTag>(U, I) - MaxL) / Z);
       float Y = Target[K];
       // dL/dlogit = softmax - one_hot, staged for backward.
-      plastix::GetBackwardAcc(U, I) = P - Y;
+      plastax::GetBackwardAcc(U, I) = P - Y;
       if (Y > 0.0f)
         Loss += -std::log(std::max(P, 1e-30f));
     }
@@ -192,32 +192,32 @@ struct EpropLoss {
 struct LifBackward {
   using Accumulator = float;
 
-  PLASTIX_HD static float Map(auto &U, size_t /*Src*/, size_t ToId, auto &C,
+  PLASTAX_HD static float Map(auto &U, size_t /*Src*/, size_t ToId, auto &C,
                               size_t ConnId, auto &) {
     // Random feedback: backward path uses FeedbackTag (fixed B) instead of
     // WeightTag (W). For input->hidden conns, FeedbackTag is zero, so
     // backward contributions into input units are zero (correct: inputs
     // aren't learnable).
-    return plastix::GetField<FeedbackTag>(C, ConnId) *
-           plastix::GetField<LearningSignalTag>(U, ToId);
+    return plastax::GetField<FeedbackTag>(C, ConnId) *
+           plastax::GetField<LearningSignalTag>(U, ToId);
   }
 
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
 
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &G, float Up) {
-    bool IsOut = plastix::GetField<IsOutputTag>(U, Id);
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &G, float Up) {
+    bool IsOut = plastax::GetField<IsOutputTag>(U, Id);
     if (IsOut) {
       // Output learning signal = staged dL/dlogit. No surrogate
       // (the integrator has linear gradient).
-      plastix::GetField<LearningSignalTag>(U, Id) =
-          plastix::GetBackwardAcc(U, Id);
+      plastax::GetField<LearningSignalTag>(U, Id) =
+          plastax::GetBackwardAcc(U, Id);
     } else {
       // e-prop learning signal for a hidden unit is the feedback-projected
       // error L_j = sum_k B_jk * delta_k (== `Up`). The surrogate psi_j
       // belongs to the eligibility trace e_ji = filter(psi_j * z_i), applied
       // in EpropUpdateConn — NOT here. Multiplying by psi again would square
       // it (delta_w ~ psi_j^2), which crushes input->hidden feature learning.
-      plastix::GetField<LearningSignalTag>(U, Id) = Up;
+      plastax::GetField<LearningSignalTag>(U, Id) = Up;
     }
   }
 };
@@ -225,21 +225,21 @@ struct LifBackward {
 // --- update connections: maintain eligibility trace + apply weight delta --
 
 struct EpropUpdateConn {
-  PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
+  PLASTAX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
                                                   size_t SrcId, auto &C,
                                                   size_t ConnId, auto &G) {
     float Slope = G.SurrogateSlope;
     float BetaT = G.BetaTrace;
     float Lr = G.Lr;
 
-    float PreSpk = plastix::GetActivation(U, SrcId);
+    float PreSpk = plastax::GetActivation(U, SrcId);
     // Output is a linear integrator (no surrogate); hidden uses
     // fast-sigmoid surrogate at the saved pre-activation.
     float Psi;
-    if (plastix::GetField<IsOutputTag>(U, DstId)) {
+    if (plastax::GetField<IsOutputTag>(U, DstId)) {
       Psi = 1.0f;
     } else {
-      float Z = plastix::GetField<PreActTag>(U, DstId);
+      float Z = plastax::GetField<PreActTag>(U, DstId);
       float Den = 1.0f + Slope * std::fabs(Z);
       Psi = 1.0f / (Den * Den);
     }
@@ -247,44 +247,44 @@ struct EpropUpdateConn {
     // the running sum saturates at ~1/(1-BetaT) (~10x for BetaT=0.9), which
     // silently inflates the effective learning rate ~10x and makes the readout
     // logits diverge (rising CE loss). Normalising keeps the trace O(input).
-    float &Elig = plastix::GetField<EligibilityTag>(C, ConnId);
+    float &Elig = plastax::GetField<EligibilityTag>(C, ConnId);
     Elig = BetaT * Elig + (1.0f - BetaT) * (PreSpk * Psi);
 
-    float L = plastix::GetField<LearningSignalTag>(U, DstId);
+    float L = plastax::GetField<LearningSignalTag>(U, DstId);
     if (L != 0.0f && Lr != 0.0f)
-      plastix::GetWeight(C, ConnId) -= Lr * L * Elig;
+      plastax::GetWeight(C, ConnId) -= Lr * L * Elig;
   }
 
-  PLASTIX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
+  PLASTAX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
                                                   auto &, size_t, auto &) {}
 };
 
 // --- traits -----------------------------------------------------------------
 
-struct SparseSnnTraits : plastix::DefaultNetworkTraits<EpropGlobals> {
+struct SparseSnnTraits : plastax::DefaultNetworkTraits<EpropGlobals> {
   using ForwardPass = LifForward;
   using BackwardPass = LifBackward;
   using Loss = EpropLoss;
   using UpdateConn = EpropUpdateConn;
-  using ExtraUnitFields = plastix::UnitFieldList<
-      plastix::alloc::SOAField<MembraneTag, float>,
-      plastix::alloc::SOAField<PreActTag, float>,
-      plastix::alloc::SOAField<LogitAccTag, float>,
-      plastix::alloc::SOAField<LearningSignalTag, float>,
-      plastix::alloc::SOAField<BetaTag, float>,
-      plastix::alloc::SOAField<ThresholdTag, float>,
-      plastix::alloc::SOAField<IsOutputTag, bool>,
-      plastix::alloc::SOAField<IsHiddenTag, bool>>;
-  using ExtraConnFields = plastix::ConnFieldList<
-      plastix::alloc::SOAField<plastix::WeightTag, float>,
-      plastix::alloc::SOAField<EligibilityTag, float>,
-      plastix::alloc::SOAField<FeedbackTag, float>>;
+  using ExtraUnitFields = plastax::UnitFieldList<
+      plastax::alloc::SOAField<MembraneTag, float>,
+      plastax::alloc::SOAField<PreActTag, float>,
+      plastax::alloc::SOAField<LogitAccTag, float>,
+      plastax::alloc::SOAField<LearningSignalTag, float>,
+      plastax::alloc::SOAField<BetaTag, float>,
+      plastax::alloc::SOAField<ThresholdTag, float>,
+      plastax::alloc::SOAField<IsOutputTag, bool>,
+      plastax::alloc::SOAField<IsHiddenTag, bool>>;
+  using ExtraConnFields = plastax::ConnFieldList<
+      plastax::alloc::SOAField<plastax::WeightTag, float>,
+      plastax::alloc::SOAField<EligibilityTag, float>,
+      plastax::alloc::SOAField<FeedbackTag, float>>;
   static constexpr size_t UnitCapacity = 4096;
   static constexpr size_t ConnCapacity = 65536; // headroom for fan-in up to ~235
 };
-static_assert(plastix::NetworkTraits<SparseSnnTraits>);
+static_assert(plastax::NetworkTraits<SparseSnnTraits>);
 
-using Net = plastix::Network<SparseSnnTraits>;
+using Net = plastax::Network<SparseSnnTraits>;
 
 // --- unit initialisers ------------------------------------------------------
 
@@ -292,10 +292,10 @@ struct InitHidden {
   float Beta;
   float Threshold;
   void operator()(auto &UA, auto Id) const {
-    plastix::GetField<BetaTag>(UA, Id) = Beta;
-    plastix::GetField<ThresholdTag>(UA, Id) = Threshold;
-    plastix::GetField<IsOutputTag>(UA, Id) = false;
-    plastix::GetField<IsHiddenTag>(UA, Id) = true;
+    plastax::GetField<BetaTag>(UA, Id) = Beta;
+    plastax::GetField<ThresholdTag>(UA, Id) = Threshold;
+    plastax::GetField<IsOutputTag>(UA, Id) = false;
+    plastax::GetField<IsHiddenTag>(UA, Id) = true;
   }
 };
 
@@ -303,10 +303,10 @@ struct InitOutput {
   float Beta;
   float Threshold;
   void operator()(auto &UA, auto Id) const {
-    plastix::GetField<BetaTag>(UA, Id) = Beta;
-    plastix::GetField<ThresholdTag>(UA, Id) = Threshold;
-    plastix::GetField<IsOutputTag>(UA, Id) = true;
-    plastix::GetField<IsHiddenTag>(UA, Id) = false;
+    plastax::GetField<BetaTag>(UA, Id) = Beta;
+    plastax::GetField<ThresholdTag>(UA, Id) = Threshold;
+    plastax::GetField<IsOutputTag>(UA, Id) = true;
+    plastax::GetField<IsHiddenTag>(UA, Id) = false;
   }
 };
 
@@ -327,11 +327,11 @@ struct LocalSparseLayer {
   float WeightScale;
 
   template <typename UnitAlloc, typename ConnAlloc>
-  plastix::UnitRange operator()(UnitAlloc &UA, ConnAlloc &CA,
-                                plastix::UnitRange Prev) const {
-    uint16_t NewLevel = plastix::GetLevel(UA, Prev.Begin) + 1;
-    uint16_t SrcLevel = plastix::GetLevel(UA, Prev.Begin);
-    plastix::UnitRange Units = UA.AllocateMany(Width);
+  plastax::UnitRange operator()(UnitAlloc &UA, ConnAlloc &CA,
+                                plastax::UnitRange Prev) const {
+    uint16_t NewLevel = plastax::GetLevel(UA, Prev.Begin) + 1;
+    uint16_t SrcLevel = plastax::GetLevel(UA, Prev.Begin);
+    plastax::UnitRange Units = UA.AllocateMany(Width);
     InitHidden Init{Beta, Threshold};
 
     std::mt19937_64 Rng(Seed);
@@ -343,7 +343,7 @@ struct LocalSparseLayer {
     std::iota(Pool.begin(), Pool.end(), Prev.Begin);
 
     for (auto Id : Units.Ids()) {
-      plastix::GetLevel(UA, Id) = NewLevel;
+      plastax::GetLevel(UA, Id) = NewLevel;
       Init(UA, Id);
 
       // Without replacement: partial Fisher-Yates over Pool to pick FanIn.
@@ -353,16 +353,16 @@ struct LocalSparseLayer {
         std::swap(Pool[I], Pool[Pick(Rng)]);
         auto Src = Pool[I];
         auto ConnId = CA.Allocate();
-        plastix::GetField<plastix::FromIdTag>(CA, ConnId) =
+        plastax::GetField<plastax::FromIdTag>(CA, ConnId) =
             static_cast<uint32_t>(Src);
-        plastix::GetField<plastix::ToIdTag>(CA, ConnId) =
+        plastax::GetField<plastax::ToIdTag>(CA, ConnId) =
             static_cast<uint32_t>(Id);
-        plastix::GetField<plastix::SrcLevelTag>(CA, ConnId) = SrcLevel;
-        plastix::GetWeight(CA, ConnId) = W(Rng);
-        plastix::GetField<EligibilityTag>(CA, ConnId) = 0.0f;
+        plastax::GetField<plastax::SrcLevelTag>(CA, ConnId) = SrcLevel;
+        plastax::GetWeight(CA, ConnId) = W(Rng);
+        plastax::GetField<EligibilityTag>(CA, ConnId) = 0.0f;
         // Input-layer source: no learning signal flows back further, so
         // leave FeedbackTag at zero.
-        plastix::GetField<FeedbackTag>(CA, ConnId) = 0.0f;
+        plastax::GetField<FeedbackTag>(CA, ConnId) = 0.0f;
       }
     }
     return Units;
@@ -381,11 +381,11 @@ struct DenseOutputLayer {
   float FeedbackScale;
 
   template <typename UnitAlloc, typename ConnAlloc>
-  plastix::UnitRange operator()(UnitAlloc &UA, ConnAlloc &CA,
-                                plastix::UnitRange Prev) const {
-    uint16_t NewLevel = plastix::GetLevel(UA, Prev.Begin) + 1;
-    uint16_t SrcLevel = plastix::GetLevel(UA, Prev.Begin);
-    plastix::UnitRange Units = UA.AllocateMany(Width);
+  plastax::UnitRange operator()(UnitAlloc &UA, ConnAlloc &CA,
+                                plastax::UnitRange Prev) const {
+    uint16_t NewLevel = plastax::GetLevel(UA, Prev.Begin) + 1;
+    uint16_t SrcLevel = plastax::GetLevel(UA, Prev.Begin);
+    plastax::UnitRange Units = UA.AllocateMany(Width);
     InitOutput Init{Beta, Threshold};
     size_t PrevWidth = Prev.End - Prev.Begin;
     float Bound =
@@ -397,18 +397,18 @@ struct DenseOutputLayer {
     std::uniform_real_distribution<float> B(-BBound, BBound);
 
     for (auto Id : Units.Ids()) {
-      plastix::GetLevel(UA, Id) = NewLevel;
+      plastax::GetLevel(UA, Id) = NewLevel;
       Init(UA, Id);
       for (auto Src : Prev.Ids()) {
         auto ConnId = CA.Allocate();
-        plastix::GetField<plastix::FromIdTag>(CA, ConnId) =
+        plastax::GetField<plastax::FromIdTag>(CA, ConnId) =
             static_cast<uint32_t>(Src);
-        plastix::GetField<plastix::ToIdTag>(CA, ConnId) =
+        plastax::GetField<plastax::ToIdTag>(CA, ConnId) =
             static_cast<uint32_t>(Id);
-        plastix::GetField<plastix::SrcLevelTag>(CA, ConnId) = SrcLevel;
-        plastix::GetWeight(CA, ConnId) = W(Rng);
-        plastix::GetField<EligibilityTag>(CA, ConnId) = 0.0f;
-        plastix::GetField<FeedbackTag>(CA, ConnId) = B(Rng);
+        plastax::GetField<plastax::SrcLevelTag>(CA, ConnId) = SrcLevel;
+        plastax::GetWeight(CA, ConnId) = W(Rng);
+        plastax::GetField<EligibilityTag>(CA, ConnId) = 0.0f;
+        plastax::GetField<FeedbackTag>(CA, ConnId) = B(Rng);
       }
     }
     return Units;
@@ -461,18 +461,18 @@ static void ResetPerExample(Net &N) {
   auto &UA = N.GetUnitAlloc();
   size_t NU = UA.Size();
   for (size_t I = 0; I < NU; ++I) {
-    plastix::GetField<MembraneTag>(UA, I) = 0.0f;
-    plastix::GetField<PreActTag>(UA, I) = 0.0f;
-    plastix::GetField<LogitAccTag>(UA, I) = 0.0f;
-    plastix::GetField<LearningSignalTag>(UA, I) = 0.0f;
-    plastix::GetField<plastix::ForwardAccTag>(UA, I) = 0.0f;
-    plastix::GetField<plastix::BackwardAccTag>(UA, I) = 0.0f;
-    plastix::GetActivation(UA, I) = 0.0f;
+    plastax::GetField<MembraneTag>(UA, I) = 0.0f;
+    plastax::GetField<PreActTag>(UA, I) = 0.0f;
+    plastax::GetField<LogitAccTag>(UA, I) = 0.0f;
+    plastax::GetField<LearningSignalTag>(UA, I) = 0.0f;
+    plastax::GetField<plastax::ForwardAccTag>(UA, I) = 0.0f;
+    plastax::GetField<plastax::BackwardAccTag>(UA, I) = 0.0f;
+    plastax::GetActivation(UA, I) = 0.0f;
   }
   auto &CA = N.GetConnAlloc();
   size_t NC = CA.Size();
   for (size_t C = 0; C < NC; ++C)
-    plastix::GetField<EligibilityTag>(CA, C) = 0.0f;
+    plastax::GetField<EligibilityTag>(CA, C) = 0.0f;
 }
 
 // --- one-hot helper -------------------------------------------------------
@@ -487,7 +487,7 @@ static std::vector<float> OneHot(int Y, size_t K) {
 // --- forward-only pass over one example (no learning) -------------------
 
 static int Predict(Net &N, const Dataset &D, size_t ExIdx,
-                   plastix::UnitRange Out, EpropGlobals &G) {
+                   plastax::UnitRange Out, EpropGlobals &G) {
   ResetPerExample(N);
   G.IsFinalStep = false;
   for (size_t T = 0; T < D.NBins; ++T) {
@@ -497,9 +497,9 @@ static int Predict(Net &N, const Dataset &D, size_t ExIdx,
   // argmax over LogitAcc on the output range
   auto &UA = N.GetUnitAlloc();
   size_t Best = Out.Begin;
-  float BestV = plastix::GetField<LogitAccTag>(UA, Out.Begin);
+  float BestV = plastax::GetField<LogitAccTag>(UA, Out.Begin);
   for (size_t I = Out.Begin + 1; I < Out.End; ++I) {
-    float V = plastix::GetField<LogitAccTag>(UA, I);
+    float V = plastax::GetField<LogitAccTag>(UA, I);
     if (V > BestV) {
       BestV = V;
       Best = I;
@@ -508,7 +508,7 @@ static int Predict(Net &N, const Dataset &D, size_t ExIdx,
   return static_cast<int>(Best - Out.Begin);
 }
 
-static double EvalAccuracy(Net &N, const Dataset &D, plastix::UnitRange Out,
+static double EvalAccuracy(Net &N, const Dataset &D, plastax::UnitRange Out,
                            EpropGlobals &G, size_t Cap = 0,
                            bool TimeShuffle = false, uint32_t ShuffleSeed = 0) {
   size_t N_Ex = D.NSamples;
@@ -534,9 +534,9 @@ static double EvalAccuracy(Net &N, const Dataset &D, plastix::UnitRange Out,
       }
       auto &UA = N.GetUnitAlloc();
       size_t Best = Out.Begin;
-      float BestV = plastix::GetField<LogitAccTag>(UA, Out.Begin);
+      float BestV = plastax::GetField<LogitAccTag>(UA, Out.Begin);
       for (size_t I = Out.Begin + 1; I < Out.End; ++I) {
-        float V = plastix::GetField<LogitAccTag>(UA, I);
+        float V = plastax::GetField<LogitAccTag>(UA, I);
         if (V > BestV) {
           BestV = V;
           Best = I;
@@ -556,7 +556,7 @@ static double EvalAccuracy(Net &N, const Dataset &D, plastix::UnitRange Out,
 // --- compute mean hidden firing rate over a slice of training data ------
 
 static double MeanFiringRate(Net &N, const Dataset &D,
-                             plastix::UnitRange Hidden, EpropGlobals &G,
+                             plastax::UnitRange Hidden, EpropGlobals &G,
                              size_t Cap) {
   size_t N_Ex = std::min(Cap, D.NSamples);
   if (N_Ex == 0)
@@ -571,7 +571,7 @@ static double MeanFiringRate(Net &N, const Dataset &D,
       N.DoForwardPass(X);
       auto &UA = N.GetUnitAlloc();
       for (size_t I = Hidden.Begin; I < Hidden.End; ++I)
-        Total += plastix::GetActivation(UA, I);
+        Total += plastax::GetActivation(UA, I);
       Slots += Hidden.End - Hidden.Begin;
     }
   }
@@ -652,8 +652,8 @@ int main(int Argc, char **Argv) {
   // The Network constructor folds builders left-to-right; OutputRange lives
   // at the last layer's UnitRange. We need the hidden range for firing-rate
   // reporting too; reconstruct by sliding past the input units.
-  plastix::UnitRange Hidden{NIn, NIn + H.NHid};
-  plastix::UnitRange OutRange{NIn + H.NHid, NIn + H.NHid + H.NumClasses};
+  plastax::UnitRange Hidden{NIn, NIn + H.NHid};
+  plastax::UnitRange OutRange{NIn + H.NHid, NIn + H.NHid + H.NumClasses};
 
   size_t NConns = bench::LiveEdgeCount(N->GetConnAlloc());
   std::cout << "[info] live conns=" << NConns
@@ -732,9 +732,9 @@ int main(int Argc, char **Argv) {
       // Argmax over LogitAcc gives the prediction without rerunning.
       auto &UA = N->GetUnitAlloc();
       size_t Best = OutRange.Begin;
-      float BestV = plastix::GetField<LogitAccTag>(UA, OutRange.Begin);
+      float BestV = plastax::GetField<LogitAccTag>(UA, OutRange.Begin);
       for (size_t I = OutRange.Begin + 1; I < OutRange.End; ++I) {
-        float V = plastix::GetField<LogitAccTag>(UA, I);
+        float V = plastax::GetField<LogitAccTag>(UA, I);
         if (V > BestV) {
           BestV = V;
           Best = I;

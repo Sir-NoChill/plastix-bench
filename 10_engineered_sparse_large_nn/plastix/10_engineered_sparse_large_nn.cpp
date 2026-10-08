@@ -33,13 +33,13 @@
 
 #include "plastix/common.hpp"
 
-#include <plastix/alloc.hpp>
-#include <plastix/conn.hpp>
-#include <plastix/layers.hpp>
-#include <plastix/macros.hpp>
-#include <plastix/plastix.hpp>
-#include <plastix/traits.hpp>
-#include <plastix/unit_state.hpp>
+#include <plastax/alloc.hpp>
+#include <plastax/conn.hpp>
+#include <plastax/layers.hpp>
+#include <plastax/macros.hpp>
+#include <plastax/plastax.hpp>
+#include <plastax/traits.hpp>
+#include <plastax/unit_state.hpp>
 
 #include <algorithm>
 #include <array>
@@ -55,7 +55,7 @@
 namespace {
 
 // --- per-connection state ----------------------------------------------------
-// plastix::WeightTag carries w; ETag is the eligibility trace.
+// plastax::WeightTag carries w; ETag is the eligibility trace.
 struct ETag {};
 
 // --- per-unit state ----------------------------------------------------------
@@ -76,25 +76,25 @@ struct Globals {
 // --- ForwardPass: README step 2 (Pipeline layer-advance) ---------------------
 struct Forward {
   using Accumulator = float;
-  PLASTIX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
+  PLASTAX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
                               size_t ConnId, auto &) {
-    return plastix::GetWeight(C, ConnId) * plastix::GetActivation(U, SrcId);
+    return plastax::GetWeight(C, ConnId) * plastax::GetActivation(U, SrcId);
   }
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &G, float Sum) {
-    if (plastix::GetField<IsOutputTag>(U, Id)) {
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &G, float Sum) {
+    if (plastax::GetField<IsOutputTag>(U, Id)) {
       float Out = std::tanh(Sum); // bounded output (keeps metric finite over
-      plastix::GetActivation(U, Id) = Out; // long horizons; not meant to converge)
+      plastax::GetActivation(U, Id) = Out; // long horizons; not meant to converge)
       G.V = Out;
     } else {
-      plastix::GetActivation(U, Id) = std::tanh(Sum); // hidden
+      plastax::GetActivation(U, Id) = std::tanh(Sum); // hidden
     }
   }
 };
 
 // --- Loss: README step 3 -----------------------------------------------------
 struct LossPolicy {
-  static void CalculateLoss(auto &, plastix::UnitRange,
+  static void CalculateLoss(auto &, plastax::UnitRange,
                             std::span<const float> Targets, Globals &G) {
     G.Delta = Targets[0] - G.V;
   }
@@ -102,16 +102,16 @@ struct LossPolicy {
 
 // --- UpdateConn: README step 4 (TD(λ)-style trace, uniform over edges) -------
 struct ConnUpdate {
-  PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t /*DstId*/,
+  PLASTAX_HD static void UpdateIncomingConnection(auto &U, size_t /*DstId*/,
                                                   size_t SrcId, auto &C,
                                                   size_t ConnId, Globals &G) {
-    using namespace plastix;
+    using namespace plastax;
     float &W = GetWeight(C, ConnId);
     float &E = GetField<ETag>(C, ConnId);
     E = hp::Decay * E + GetActivation(U, SrcId);
     W += hp::LR * G.Delta * E;
   }
-  PLASTIX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t, auto &,
+  PLASTAX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t, auto &,
                                                   size_t, Globals &) {}
 };
 
@@ -119,7 +119,7 @@ struct ResetGlobalPolicy {
   static void Reset(auto &G) { G.Delta = 0.0f; }
 };
 
-struct Traits : plastix::DefaultNetworkTraits<Globals> {
+struct Traits : plastax::DefaultNetworkTraits<Globals> {
   using ForwardPass = Forward;
   using Loss = LossPolicy;
   using UpdateConn = ConnUpdate;
@@ -128,13 +128,13 @@ struct Traits : plastix::DefaultNetworkTraits<Globals> {
   static constexpr bool KernelizeAdd = false;
   static constexpr bool ReverseAdjForward = false;
 
-  using ExtraConnFields = plastix::ConnFieldList<
-      plastix::alloc::SOAField<plastix::WeightTag, float>,
-      plastix::alloc::SOAField<ETag, float>>;
-  using ExtraUnitFields = plastix::UnitFieldList<
-      plastix::alloc::SOAField<IsOutputTag, uint8_t>>;
+  using ExtraConnFields = plastax::ConnFieldList<
+      plastax::alloc::SOAField<plastax::WeightTag, float>,
+      plastax::alloc::SOAField<ETag, float>>;
+  using ExtraUnitFields = plastax::UnitFieldList<
+      plastax::alloc::SOAField<IsOutputTag, uint8_t>>;
 
-  static constexpr plastix::Propagation Model = plastix::Propagation::Pipeline;
+  static constexpr plastax::Propagation Model = plastax::Propagation::Pipeline;
 
   // Initial network: ~4000 units / ~24k edges. Growth caps at MAX_UNITS=6000
   // and steadily adds edges (net +9 edges per grow event, minus 8 prunes), so
@@ -150,8 +150,8 @@ struct Traits : plastix::DefaultNetworkTraits<Globals> {
   static constexpr size_t ConnCapacity = ESLN_CONN_CAPACITY;
 };
 
-static_assert(plastix::NetworkTraits<Traits>);
-using Net = plastix::Network<Traits>;
+static_assert(plastax::NetworkTraits<Traits>);
+using Net = plastax::Network<Traits>;
 
 // --- shared LCG (README §"Shared LCG") --------------------------------------
 struct Lcg {
@@ -233,9 +233,9 @@ struct TopologyBuilder {
   const Topology *Topo;
 
   template <typename UnitAlloc, typename ConnAlloc>
-  PLASTIX_HOST plastix::UnitRange operator()(UnitAlloc &UA, ConnAlloc &CA,
-                                             plastix::UnitRange Inputs) const {
-    using namespace plastix;
+  PLASTAX_HOST plastax::UnitRange operator()(UnitAlloc &UA, ConnAlloc &CA,
+                                             plastax::UnitRange Inputs) const {
+    using namespace plastax;
     const Topology &T = *Topo;
     // Inputs [0, NIn) are layer 0 already; set them explicitly for clarity.
     for (size_t I = 0; I < T.NIn; ++I) {
@@ -317,7 +317,7 @@ int main(int Argc, char **Argv) {
             << " quick=" << (Args.Quick ? 1 : 0) << "\n";
 
   auto InputInit = [](auto &U, size_t Id) {
-    plastix::GetField<IsOutputTag>(U, Id) = 0;
+    plastax::GetField<IsOutputTag>(U, Id) = 0;
   };
   Net Network(Topo.NIn, InputInit, TopologyBuilder{&Topo});
 
@@ -373,7 +373,7 @@ int main(int Argc, char **Argv) {
       // Grow GROW_UNITS hidden units (capped at MAX_UNITS).
       uint32_t MaxHiddenLayer = 0;
       for (size_t I = Topo.NIn; I < UA.Size(); ++I)
-        MaxHiddenLayer = std::max<uint32_t>(MaxHiddenLayer, plastix::GetLevel(UA, I));
+        MaxHiddenLayer = std::max<uint32_t>(MaxHiddenLayer, plastax::GetLevel(UA, I));
       for (uint32_t G = 0; G < gs::GrowUnits; ++G) {
         if (UA.Size() >= gs::MaxUnits)
           break;
@@ -382,16 +382,16 @@ int main(int Argc, char **Argv) {
         auto NewId = UA.Allocate();
         if (NewId == static_cast<size_t>(-1))
           break;
-        plastix::GetLevel(UA, NewId) = static_cast<uint16_t>(
-            std::min<uint32_t>(NewLayer, plastix::MaxLevels - 1));
-        plastix::GetField<IsOutputTag>(UA, NewId) = 0;
+        plastax::GetLevel(UA, NewId) = static_cast<uint16_t>(
+            std::min<uint32_t>(NewLayer, plastax::MaxLevels - 1));
+        plastax::GetField<IsOutputTag>(UA, NewId) = 0;
         // FANIN incoming edges from distinct earlier units.
         uint32_t Added = 0, Attempts = 0;
         std::vector<uint32_t> Used;
         while (Added < gs::Fanin && Attempts < 64) {
           ++Attempts;
           uint32_t Src = Rng.Next() % Topo.OutputId;
-          if (plastix::GetLevel(UA, Src) >= NewLayer)
+          if (plastax::GetLevel(UA, Src) >= NewLayer)
             continue;
           if (std::find(Used.begin(), Used.end(), Src) != Used.end())
             continue;
@@ -399,24 +399,24 @@ int main(int Argc, char **Argv) {
           auto C = CA.Allocate();
           if (C == static_cast<size_t>(-1))
             break;
-          plastix::GetField<plastix::FromIdTag>(CA, C) = Src;
-          plastix::GetField<plastix::ToIdTag>(CA, C) =
+          plastax::GetField<plastax::FromIdTag>(CA, C) = Src;
+          plastax::GetField<plastax::ToIdTag>(CA, C) =
               static_cast<uint32_t>(NewId);
-          plastix::GetField<plastix::SrcLevelTag>(CA, C) =
-              plastix::GetLevel(UA, Src);
-          plastix::GetWeight(CA, C) = 0.0f;
+          plastax::GetField<plastax::SrcLevelTag>(CA, C) =
+              plastax::GetLevel(UA, Src);
+          plastax::GetWeight(CA, C) = 0.0f;
           LiveEdges.push_back(C);
           ++Added;
         }
         // One edge (newunit -> output).
         auto Co = CA.Allocate();
         if (Co != static_cast<size_t>(-1)) {
-          plastix::GetField<plastix::FromIdTag>(CA, Co) =
+          plastax::GetField<plastax::FromIdTag>(CA, Co) =
               static_cast<uint32_t>(NewId);
-          plastix::GetField<plastix::ToIdTag>(CA, Co) = Topo.OutputId;
-          plastix::GetField<plastix::SrcLevelTag>(CA, Co) =
-              plastix::GetLevel(UA, NewId);
-          plastix::GetWeight(CA, Co) = 0.0f;
+          plastax::GetField<plastax::ToIdTag>(CA, Co) = Topo.OutputId;
+          plastax::GetField<plastax::SrcLevelTag>(CA, Co) =
+              plastax::GetLevel(UA, NewId);
+          plastax::GetWeight(CA, Co) = 0.0f;
           LiveEdges.push_back(Co);
         }
       }
@@ -426,9 +426,9 @@ int main(int Argc, char **Argv) {
           break;
         uint32_t Idx = Rng.Next() % static_cast<uint32_t>(LiveEdges.size());
         size_t C = LiveEdges[Idx];
-        if (plastix::GetField<plastix::ToIdTag>(CA, C) == Topo.OutputId)
+        if (plastax::GetField<plastax::ToIdTag>(CA, C) == Topo.OutputId)
           continue; // keep the output connected
-        plastix::GetField<plastix::DeadTag>(CA, C) = true;
+        plastax::GetField<plastax::DeadTag>(CA, C) = true;
         LiveEdges[Idx] = LiveEdges.back();
         LiveEdges.pop_back();
       }

@@ -1,5 +1,5 @@
-#ifndef TRADITIONAL_PLASTIX_COMMON_HPP
-#define TRADITIONAL_PLASTIX_COMMON_HPP
+#ifndef TRADITIONAL_PLASTAX_COMMON_HPP
+#define TRADITIONAL_PLASTAX_COMMON_HPP
 
 // Shared infrastructure for the traditional-plastix benchmark suite.
 //
@@ -18,7 +18,7 @@
 //   - bench::ReadCsv           tiny CSV reader for the cached datasets under
 //                              data/
 
-#include <plastix/conn.hpp>
+#include <plastax/conn.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -234,7 +234,7 @@ inline CsvFile ReadCsv(const std::filesystem::path &Path) {
 
 using EdgeSet = std::set<uint64_t>;
 
-PLASTIX_HD uint64_t PackEdge(uint32_t From, uint32_t To) {
+PLASTAX_HD uint64_t PackEdge(uint32_t From, uint32_t To) {
   return (static_cast<uint64_t>(From) << 32) | static_cast<uint64_t>(To);
 }
 
@@ -242,10 +242,10 @@ template <typename ConnAlloc> inline EdgeSet LiveEdgeSet(ConnAlloc &CA) {
   EdgeSet S;
   size_t N = CA.Size();
   for (size_t I = 0; I < N; ++I) {
-    if (plastix::GetField<plastix::DeadTag>(CA, I))
+    if (plastax::GetField<plastax::DeadTag>(CA, I))
       continue;
-    auto F = plastix::GetField<plastix::FromIdTag>(CA, I);
-    auto T = plastix::GetField<plastix::ToIdTag>(CA, I);
+    auto F = plastax::GetField<plastax::FromIdTag>(CA, I);
+    auto T = plastax::GetField<plastax::ToIdTag>(CA, I);
     S.insert(PackEdge(F, T));
   }
   return S;
@@ -255,7 +255,7 @@ template <typename ConnAlloc> inline size_t LiveEdgeCount(ConnAlloc &CA) {
   size_t N = CA.Size();
   size_t Live = 0;
   for (size_t I = 0; I < N; ++I)
-    if (!plastix::GetField<plastix::DeadTag>(CA, I))
+    if (!plastax::GetField<plastax::DeadTag>(CA, I))
       ++Live;
   return Live;
 }
@@ -580,4 +580,4 @@ private:
 
 } // namespace bench
 
-#endif // TRADITIONAL_PLASTIX_COMMON_HPP
+#endif // TRADITIONAL_PLASTAX_COMMON_HPP

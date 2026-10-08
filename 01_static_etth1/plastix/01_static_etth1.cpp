@@ -23,8 +23,8 @@
 
 #include "plastix/common.hpp"
 
-#include <plastix/math.hpp>
-#include <plastix/plastix.hpp>
+#include <plastax/math.hpp>
+#include <plastax/plastax.hpp>
 
 #include <chrono>
 #include <cmath>
@@ -62,16 +62,16 @@ struct IsOutputTag {};
 
 struct StaticForward {
   using Accumulator = float;
-  PLASTIX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
+  PLASTAX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
                               size_t ConnId, auto &) {
-    return plastix::GetWeight(C, ConnId) * plastix::GetActivation(U, SrcId);
+    return plastax::GetWeight(C, ConnId) * plastax::GetActivation(U, SrcId);
   }
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &, float Z) {
-    plastix::GetField<PreActTag>(U, Id) = Z;
-    plastix::GetActivation(U, Id) = plastix::GetField<IsOutputTag>(U, Id)
-                                        ? plastix::math::Linear(Z)
-                                        : plastix::math::GeLU(Z);
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &, float Z) {
+    plastax::GetField<PreActTag>(U, Id) = Z;
+    plastax::GetActivation(U, Id) = plastax::GetField<IsOutputTag>(U, Id)
+                                        ? plastax::math::Linear(Z)
+                                        : plastax::math::GeLU(Z);
   }
 };
 
@@ -84,19 +84,19 @@ struct StaticForward {
 // clears after each level's Apply).
 struct StaticBackward {
   using Accumulator = float;
-  PLASTIX_HD static float Map(auto &U, size_t, size_t ToId, auto &C,
+  PLASTAX_HD static float Map(auto &U, size_t, size_t ToId, auto &C,
                               size_t ConnId, auto &) {
-    return plastix::GetWeight(C, ConnId) *
-           plastix::GetField<GradPreActTag>(U, ToId);
+    return plastax::GetWeight(C, ConnId) *
+           plastax::GetField<GradPreActTag>(U, ToId);
   }
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &, float Accumulated) {
-    bool IsOut = plastix::GetField<IsOutputTag>(U, Id);
-    float DLDA = IsOut ? plastix::GetBackwardAcc(U, Id) : Accumulated;
-    float Z = plastix::GetField<PreActTag>(U, Id);
-    float DPhiDz = IsOut ? plastix::math::LinearGrad(Z)
-                         : plastix::math::GeLUGradFromPreact(Z);
-    plastix::GetField<GradPreActTag>(U, Id) = DLDA * DPhiDz;
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &, float Accumulated) {
+    bool IsOut = plastax::GetField<IsOutputTag>(U, Id);
+    float DLDA = IsOut ? plastax::GetBackwardAcc(U, Id) : Accumulated;
+    float Z = plastax::GetField<PreActTag>(U, Id);
+    float DPhiDz = IsOut ? plastax::math::LinearGrad(Z)
+                         : plastax::math::GeLUGradFromPreact(Z);
+    plastax::GetField<GradPreActTag>(U, Id) = DLDA * DPhiDz;
   }
 };
 
@@ -110,48 +110,48 @@ struct StaticGlobals {
 
 // w_ij -= lr * (dL/dz_dst) * a_src. Standard SGD on float weights.
 struct StaticUpdateConn {
-  PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
+  PLASTAX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
                                                   size_t SrcId, auto &C,
                                                   size_t ConnId, auto &G) {
-    float Grad = plastix::GetField<GradPreActTag>(U, DstId);
-    float A = plastix::GetActivation(U, SrcId);
-    plastix::GetWeight(C, ConnId) -= G.Lr * Grad * A;
+    float Grad = plastax::GetField<GradPreActTag>(U, DstId);
+    float A = plastax::GetActivation(U, SrcId);
+    plastax::GetWeight(C, ConnId) -= G.Lr * Grad * A;
   }
-  PLASTIX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
+  PLASTAX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
                                                   auto &, size_t, auto &) {}
 };
 
-struct StaticTraits : plastix::DefaultNetworkTraits<> {
+struct StaticTraits : plastax::DefaultNetworkTraits<> {
   using GlobalState = StaticGlobals;
   using ForwardPass = StaticForward;
   using BackwardPass = StaticBackward;
-  using Loss = plastix::MSELoss;
+  using Loss = plastax::MSELoss;
   using UpdateConn = StaticUpdateConn;
-  using ExtraUnitFields = plastix::UnitFieldList<
-      plastix::alloc::SOAField<PreActTag, float>,
-      plastix::alloc::SOAField<GradPreActTag, float>,
-      plastix::alloc::SOAField<IsOutputTag, bool>>;
+  using ExtraUnitFields = plastax::UnitFieldList<
+      plastax::alloc::SOAField<PreActTag, float>,
+      plastax::alloc::SOAField<GradPreActTag, float>,
+      plastax::alloc::SOAField<IsOutputTag, bool>>;
   // 7-channel ETTh1 with in_len=96 / out_len=24 / hidden=256 / depth=3
   // peaks at 1352 units and ~280k connections. Headroom on top of that.
   static constexpr size_t UnitCapacity = 4096;
   static constexpr size_t ConnCapacity = 524288;
 };
-static_assert(plastix::NetworkTraits<StaticTraits>);
+static_assert(plastax::NetworkTraits<StaticTraits>);
 
-using Net = plastix::Network<StaticTraits>;
+using Net = plastax::Network<StaticTraits>;
 
 struct UniformInit {
   uint64_t Seed;
   float Limit;
   void operator()(auto &CA, auto Id) const {
-    plastix::GetWeight(CA, Id) =
-        plastix::UniformReal(Seed, static_cast<uint64_t>(Id), -Limit, Limit);
+    plastax::GetWeight(CA, Id) =
+        plastax::UniformReal(Seed, static_cast<uint64_t>(Id), -Limit, Limit);
   }
 };
 
 struct MarkOutput {
   void operator()(auto &UA, auto Id) const {
-    plastix::GetField<IsOutputTag>(UA, Id) = true;
+    plastax::GetField<IsOutputTag>(UA, Id) = true;
   }
 };
 
@@ -299,8 +299,8 @@ static double EvalMse(Net &N, const std::vector<std::vector<float>> &X,
   return Cnt ? Sum / Cnt : 0.0;
 }
 
-using FCHidden = plastix::FullyConnected<UniformInit>;
-using FCOut = plastix::FullyConnected<UniformInit, MarkOutput>;
+using FCHidden = plastax::FullyConnected<UniformInit>;
+using FCOut = plastax::FullyConnected<UniformInit, MarkOutput>;
 
 // `Depth` follows PyTorch's convention: total number of Linear layers, of
 // which `Depth - 1` are GeLU hidden and the last is the linear readout.

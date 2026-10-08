@@ -6,7 +6,7 @@
 #     Creates a target named `plastix_<BENCH>`, output binary named
 #     `run_benchmark`, deposited at:
 #         <build>/<BENCH>/plastix/run_benchmark
-#     Linked against the Plastix library (imported target plastix::plastix)
+#     Linked against the Plastix library (imported target plastax::cpp)
 #     and, when CUDA is enabled in the Plastix build, the CUDA toolkit.
 #
 #   plastix_add_cpp_bench(BENCH SRC)
@@ -102,7 +102,7 @@ function(plastix_add_plastix_bench BENCH SRC)
     target_include_directories(${_target} PRIVATE
         ${PLASTIX_BENCH_COMMON}
         ${PLASTIX_BENCH_ROOT}/${BENCH}/plastix)
-    target_link_libraries(${_target} PRIVATE plastix::plastix)
+    target_link_libraries(${_target} PRIVATE plastax::cpp)
     target_compile_options(${_target} PRIVATE -Wall -Wextra -Wpedantic)
     # Under PLASTIX_BENCH_ENABLE_CUDA, compile this TU with nvcc (no-op for the
     # host build).

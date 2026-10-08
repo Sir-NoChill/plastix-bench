@@ -22,12 +22,12 @@
 
 #include "plastix/common.hpp"
 
-#include <plastix/alloc.hpp>
-#include <plastix/conn.hpp>
-#include <plastix/macros.hpp>
-#include <plastix/plastix.hpp>
-#include <plastix/traits.hpp>
-#include <plastix/unit_state.hpp>
+#include <plastax/alloc.hpp>
+#include <plastax/conn.hpp>
+#include <plastax/macros.hpp>
+#include <plastax/plastax.hpp>
+#include <plastax/traits.hpp>
+#include <plastax/unit_state.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -104,23 +104,23 @@ void NormalizeInPlace(std::vector<float> &S) {
 struct Forward {
   using Accumulator = float;
   // Pipeline forward: Self=dest, Other=src. Sum over edges of w·x_src(t-1).
-  PLASTIX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
+  PLASTAX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
                               size_t ConnId, auto &) {
-    return plastix::GetWeight(C, ConnId) * plastix::GetActivation(U, SrcId);
+    return plastax::GetWeight(C, ConnId) * plastax::GetActivation(U, SrcId);
   }
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
   // Leaky-tanh: x_i(t) = (1-α) x_i(t-1) + α tanh(Sum). Reads its own prior
   // activation (not yet overwritten this step). Input units aren't applied.
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &, float Sum) {
-    float Old = plastix::GetActivation(U, Id);
-    plastix::GetActivation(U, Id) =
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &, float Sum) {
+    float Old = plastax::GetActivation(U, Id);
+    plastax::GetActivation(U, Id) =
         (1.0f - hp::Leak) * Old + hp::Leak * std::tanh(Sum);
   }
 };
 
-struct Traits : plastix::DefaultNetworkTraits<> {
+struct Traits : plastax::DefaultNetworkTraits<> {
   using ForwardPass = Forward;
-  static constexpr plastix::Propagation Model = plastix::Propagation::Pipeline;
+  static constexpr plastax::Propagation Model = plastax::Propagation::Pipeline;
   static constexpr bool KernelizeUpdate = false;
   static constexpr bool KernelizeAdd = false;
   static constexpr bool ReverseAdjForward = false;
@@ -128,8 +128,8 @@ struct Traits : plastix::DefaultNetworkTraits<> {
   static constexpr size_t UnitCapacity = 512;
   static constexpr size_t ConnCapacity = 32768;
 };
-static_assert(plastix::NetworkTraits<Traits>);
-using Net = plastix::Network<Traits>;
+static_assert(plastax::NetworkTraits<Traits>);
+using Net = plastax::Network<Traits>;
 
 // ---- Reservoir builder: allocate N units + the fixed W_in / W_rec edges -----
 struct ReservoirBuilder {
@@ -137,9 +137,9 @@ struct ReservoirBuilder {
   uint64_t Seed;
 
   template <typename UnitAlloc, typename ConnAlloc>
-  PLASTIX_HOST plastix::UnitRange operator()(UnitAlloc &UA, ConnAlloc &CA,
-                                             plastix::UnitRange Inputs) const {
-    using namespace plastix;
+  PLASTAX_HOST plastax::UnitRange operator()(UnitAlloc &UA, ConnAlloc &CA,
+                                             plastax::UnitRange Inputs) const {
+    using namespace plastax;
     const size_t InputId = Inputs.Begin; // the single input unit (level 0)
     std::mt19937_64 Rng(Seed);
     std::uniform_real_distribution<float> UIn(-hp::InputScale, hp::InputScale);
@@ -282,7 +282,7 @@ int main(int Argc, char **Argv) {
   std::array<float, 1> In{0.0f};
   auto ReadState = [&](std::vector<float> &Dst) {
     for (int I = 0; I < N; ++I)
-      Dst[I] = plastix::GetActivation(UA, ResBegin + I);
+      Dst[I] = plastax::GetActivation(UA, ResBegin + I);
   };
 
   bench::PhaseTimer Timer;
