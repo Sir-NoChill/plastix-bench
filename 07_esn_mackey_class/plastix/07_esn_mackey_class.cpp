@@ -122,9 +122,11 @@ struct Forward {
 struct Traits : plastax::DefaultNetworkTraits<> {
   using ForwardPass = Forward;
   static constexpr plastax::Propagation Model = plastax::Propagation::Pipeline;
-  static constexpr bool KernelizeUpdate = false;
-  static constexpr bool KernelizeAdd = false;
   static constexpr bool ReverseAdjForward = false;
+  // The forward is the only phase and runs as a device kernel, so on CUDA the
+  // reservoir stays in device memory; each step copies the reservoir state
+  // out for the host-side readout.
+  static constexpr bool DeviceResident = true;
   // 1 input + N reservoir units; ~N² recurrent edges + N input edges.
   static constexpr size_t UnitCapacity = 512;
   static constexpr size_t ConnCapacity = 32768;
@@ -282,6 +284,7 @@ int main(int Argc, char **Argv) {
 
   std::array<float, 1> In{0.0f};
   auto ReadState = [&](std::vector<float> &Dst) {
+    bench::PullField<plastax::ActivationTag>(UA, ResBegin, N);
     for (int I = 0; I < N; ++I)
       Dst[I] = plastax::GetActivation(UA, ResBegin + I);
   };
