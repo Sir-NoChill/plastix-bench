@@ -7,8 +7,9 @@
 //
 // Plastix policy mapping (see SPEC.md in this directory for the full story):
 //
-//   ForwardPass   custom    leaky-tanh step (LTC-lite); float Accumulator
-//                           carrying the synaptic drive.
+//   ForwardPass   custom    leaky-tanh step (LTC-lite); Accumulator is the
+//                           one-field struct LtcAcc { Drive }, declared a
+//                           componentwise sum so it runs as a device kernel.
 //   Loss          MSELoss   built-in; motor activations vs target each step
 //                           (sine task is sequence-to-sequence regression).
 //   BackwardPass  custom    one Pipeline backward sweep produces the per-unit
@@ -62,6 +63,25 @@ enum class Kind : uint8_t {
   Motor   = 3,
 };
 
+// Forward accumulator. We started with the LTC semi-implicit Euler
+// formulation (numerator + denominator reductions), but the |w|·f
+// denominator collapses every unit toward zero under sparse small weights
+// — the network never escapes the constant-zero predictor (MSE ≈ 0.5 on
+// unit-amplitude sin/cos). A scalar accumulator on top of a
+// leaky-tanh RNN (the discrete LTC-lite the LTC paper itself reduces to
+// in its appendix) recovers the right gradient flow without sacrificing
+// the continuous-time interpretation — α plays τ's role and the synaptic
+// drive Σ w_ij · tanh(x_src) plays Σ S_ij · (A_ij − x_i).
+//
+// Keeping the struct around (even with just one field) means the
+// framework's Accumulator-as-struct path is still exercised — that was
+// part of the point of this benchmark, see SPEC.md. `Components` lists its
+// float members so the forward can run as a device kernel.
+struct LtcAcc {
+  float Drive = 0.0f;
+  using Components = plastax::FloatComponents<&LtcAcc::Drive>;
+};
+
 // ---------------------------------------------------------------------------
 // Hyperparameters — kept as static members so the CLI can rewrite them once
 // at startup, then the policy structs read them in their lambdas. The same
@@ -88,51 +108,43 @@ struct Hyper {
 // Policies
 // ---------------------------------------------------------------------------
 
-// Forward. We started with the LTC semi-implicit Euler formulation
-// (numerator + denominator reductions), but the |w|·f denominator collapses
-// every unit toward zero under sparse small weights — the network never
-// escapes the constant-zero predictor (MSE ≈ 0.5 on unit-amplitude sin/cos).
-// A scalar accumulator on top of a leaky-tanh RNN (the discrete LTC-lite the
-// LTC paper itself reduces to in its appendix) recovers the right gradient
-// flow without sacrificing the continuous-time interpretation — α plays τ's
-// role and the synaptic drive Σ w_ij · tanh(x_src) plays Σ S_ij · (A_ij − x_i).
-//
-// The drive is a plain float sum, so the pass runs as a device kernel and the
-// network can stay device-resident. It used to be a one-field struct, kept to
-// exercise the struct-Accumulator path, which only runs on the host.
 struct LtcForward {
-  using Accumulator = float;
-  static constexpr bool CombineIsSum = true;
+  // Combine adds component-wise, so the pass runs as a device kernel and the
+  // network can stay device-resident.
+  using Accumulator = LtcAcc;
+  static constexpr bool CombineIsComponentwiseSum = true;
 
   // Synaptic drive into the destination unit. The synapse activation is
   // tanh(γ·(x_src − μ)) — bounded and signed, so a positive w can either
   // excite or inhibit depending on the source's sign. Wired here as
   // tanh(x_src) (γ=1, μ=0) to keep the gradient computation symmetric
   // and well-conditioned.
-  PLASTAX_HD static float Map(auto &U, size_t /*Dst*/, size_t Src, auto &C,
-                              size_t Cid, auto &) {
+  PLASTAX_HD static LtcAcc Map(auto &U, size_t /*Dst*/, size_t Src,
+                               auto &C, size_t Cid, auto &) {
     float Xs = plastax::GetActivation(U, Src);
     float W  = plastax::GetWeight(C, Cid);
-    return W * std::tanh(Xs);
+    return LtcAcc{W * std::tanh(Xs)};
   }
 
-  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static LtcAcc Combine(LtcAcc A, LtcAcc B) {
+    return LtcAcc{A.Drive + B.Drive};
+  }
 
   // x_new = tanh(α · x_prev + Σ w_ij · tanh(x_src_prev)), α ∈ (0, 1)
   // derived from τ as α = exp(−Δt / τ). The sine-task targets sit in
   // [−1, 1] (sin/cos), so a tanh-saturated readout is in the right
   // range. A linear motor unit would let the recurrent motor→command
   // feedback drive unbounded activations within a few steps.
-  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &G, float Drive) {
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &G, LtcAcc Acc) {
     float Tau = plastax::GetField<TauTag>(U, Id);
     if (Tau <= 0.0f) Tau = 1.0f;
     float Alpha = std::exp(-G.Dt / Tau);
     float Xprev = plastax::GetActivation(U, Id);
-    float Pre   = Alpha * Xprev + Drive;
+    float Pre   = Alpha * Xprev + Acc.Drive;
     float Xnew  = std::tanh(Pre);
     plastax::GetActivation(U, Id)         = Xnew;
     plastax::GetField<LastDenomTag>(U, Id) = Alpha;        // saved for e-prop
-    plastax::GetField<LastFsumTag>(U, Id)  = Drive;        // diagnostic
+    plastax::GetField<LastFsumTag>(U, Id)  = Acc.Drive;    // diagnostic
   }
 };
 
@@ -406,7 +418,7 @@ static void ResetPerSequence(Net &N, size_t NumInput) {
     plastax::GetField<LearningSignalTag>(Ua, Id) = 0.0f;
     plastax::GetField<LastDenomTag>(Ua, Id) = 1.0f;
     plastax::GetField<LastFsumTag>(Ua, Id) = 0.0f;
-    plastax::GetForwardAcc(Ua, Id) = 0.0f;
+    plastax::GetForwardAcc(Ua, Id) = LtcAcc{};
     plastax::GetField<plastax::BackwardAccTag>(Ua, Id) = 0.0f;
   }
   size_t Nc = Ca.Size();
