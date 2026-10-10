@@ -38,12 +38,12 @@ option(PLASTIX_BENCH_ENABLE_CUDA
 if(PLASTIX_BENCH_ENABLE_CUDA)
     # Make the from-source Plastix (FetchContent, below) build its CUDA path.
     # Harmless for an already-installed Plastix found via find_package.
-    set(PLASTIX_ENABLE_CUDA ON CACHE BOOL "" FORCE)
+    set(PLASTAX_ENABLE_CUDA ON CACHE BOOL "" FORCE)
 
     # Locate the toolkit first (honours -DCUDAToolkit_ROOT, as Plastix's own
     # build does) so we can point the CUDA language at nvcc even when it is not
     # on PATH. Also provides CUDA::cudart in this scope for robust cross-scope
-    # linking (Plastix links it transitively through plastix::plastix).
+    # linking (Plastix links it transitively through plastax::cpp).
     find_package(CUDAToolkit REQUIRED)
     if(NOT CMAKE_CUDA_COMPILER)
         if(NOT CUDAToolkit_NVCC_EXECUTABLE)
@@ -103,28 +103,28 @@ endif()
 #
 # Preferred: an installed Plastix discovered via find_package (point
 # CMAKE_PREFIX_PATH at its install prefix). Falls back to building Plastix
-# from source — a local checkout via -DPLASTIX_SOURCE_DIR=/path/to/plastix,
+# from source — a local checkout via -DPLASTAX_CPP_SOURCE_DIR=/path/to/plastix,
 # otherwise fetched from upstream. Either way the imported target is
-# `plastix::plastix`.
+# `plastax::cpp`.
 # ----------------------------------------------------------------------------
-find_package(plastix CONFIG QUIET)
-if(NOT plastix_FOUND)
+find_package(plastax_cpp CONFIG QUIET)
+if(NOT plastax_cpp_FOUND)
     include(FetchContent)
     # Plastix's own tests/examples/benchmarks are irrelevant here; build only
     # the library so the fetch stays cheap.
-    set(PLASTIX_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(PLASTIX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(PLASTIX_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
-    if(PLASTIX_SOURCE_DIR)
-        message(STATUS "plastix-bench: building Plastix from ${PLASTIX_SOURCE_DIR}")
-        FetchContent_Declare(plastix SOURCE_DIR "${PLASTIX_SOURCE_DIR}")
+    set(PLASTAX_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(PLASTAX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(PLASTAX_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+    if(PLASTAX_CPP_SOURCE_DIR)
+        message(STATUS "plastix-bench: building Plastix from ${PLASTAX_CPP_SOURCE_DIR}")
+        FetchContent_Declare(plastax_cpp SOURCE_DIR "${PLASTAX_CPP_SOURCE_DIR}")
     else()
         message(STATUS "plastix-bench: fetching Plastix from upstream git")
-        FetchContent_Declare(plastix
-            GIT_REPOSITORY https://github.com/dhanrajhira/plastix.git
-            GIT_TAG master)
+        FetchContent_Declare(plastax_cpp
+            GIT_REPOSITORY https://github.com/Sir-NoChill/plastax-cpp.git
+            GIT_TAG main)
     endif()
-    FetchContent_MakeAvailable(plastix)
+    FetchContent_MakeAvailable(plastax_cpp)
 endif()
 
 # Make the shared bench helpers available; they expect PLASTIX_BENCH_ROOT to

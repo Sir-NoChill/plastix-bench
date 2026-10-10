@@ -41,7 +41,7 @@ Usage:
     # Build the C++ binaries (one-time / after editing them). Point Plastix
     # discovery at an install prefix, or build it from a local checkout:
     cmake -S . -B build-host -DCMAKE_PREFIX_PATH=/path/to/plastix-install
-    #   ...or:  -DPLASTIX_SOURCE_DIR=/path/to/plastix
+    #   ...or:  -DPLASTAX_CPP_SOURCE_DIR=/path/to/plastix
     cmake --build build-host -j
 
     # Run from the repo root:

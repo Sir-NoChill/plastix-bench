@@ -23,14 +23,14 @@
 #include "plastix/common.hpp"
 #include "../cpp/examples/dataset.hpp"
 
-#include <plastix/alloc.hpp>
-#include <plastix/device_atomics.hpp>
-#include <plastix/device_rng.hpp>
-#include <plastix/macros.hpp>
-#include <plastix/plastix.hpp>
-#include <plastix/reverse_adjacency.hpp>
-#include <plastix/traits.hpp>
-#include <plastix/unit_state.hpp>
+#include <plastax/alloc.hpp>
+#include <plastax/device_atomics.hpp>
+#include <plastax/device_rng.hpp>
+#include <plastax/macros.hpp>
+#include <plastax/plastax.hpp>
+#include <plastax/reverse_adjacency.hpp>
+#include <plastax/traits.hpp>
+#include <plastax/unit_state.hpp>
 
 #ifdef __CUDA_ARCH__
 #include <cuda_runtime.h>
@@ -51,7 +51,7 @@
 namespace {
 
 // --- per-connection state ----------------------------------------------------
-// (plastix::WeightTag is reused for w_i.)
+// (plastax::WeightTag is reused for w_i.)
 struct ZTag {};
 struct ZDeltaTag {};
 struct DeltaWTag {};
@@ -79,8 +79,8 @@ struct InDegreeTag {}; // per-unit incoming-edge count (for on-device forward)
 // Global reductions over edges (G.Tau/G.B/G.VDelta) all target one scalar; use
 // the warp-aggregated atomic to avoid the per-edge serialization that profiling
 // showed was ~99% of the on-device update phase.
-PLASTIX_HD void AtomicAddGlobal(float &Dst, float Val) {
-  plastix::WarpAtomicAdd(Dst, Val);
+PLASTAX_HD void AtomicAddGlobal(float &Dst, float Val) {
+  plastax::WarpAtomicAdd(Dst, Val);
 }
 
 struct UnitFlags {
@@ -119,13 +119,13 @@ struct ImprintingLearnerGlobals {
 
 struct ImprintingLearnerOutputUnitInit {
   void operator()(auto &UA, auto Id) const {
-    plastix::GetField<UKindTag>(UA, Id) = UK_Output;
+    plastax::GetField<UKindTag>(UA, Id) = UK_Output;
   }
 };
 
 struct ImprintingLearnerConnInit {
   void operator()(auto &CA, auto ConnId) const {
-    plastix::GetField<BetaTag>(CA, ConnId) = std::log(hp::AlphaInit);
+    plastax::GetField<BetaTag>(CA, ConnId) = std::log(hp::AlphaInit);
   }
 };
 
@@ -136,26 +136,26 @@ struct ImprintingLearnerForward {
   // field (via the reverse-adjacency), so the pattern threshold (avg = Σ/n)
   // still works on-device.
   using Accumulator = float;
-  PLASTIX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
+  PLASTAX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
                               size_t ConnId, auto &) {
-    return plastix::GetWeight(C, ConnId) * plastix::GetActivation(U, SrcId);
+    return plastax::GetWeight(C, ConnId) * plastax::GetActivation(U, SrcId);
   }
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &G, float Activation) {
-    UnitKind Kind = plastix::GetField<UKindTag>(U, Id);
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &G, float Activation) {
+    UnitKind Kind = plastax::GetField<UKindTag>(U, Id);
     if (Kind == UK_Output) {
-      plastix::GetActivation(U, Id) = Activation;
+      plastax::GetActivation(U, Id) = Activation;
       G.V = Activation;
     } else if (Kind == UK_Pattern) {
-      auto Threshold = plastix::GetField<ActThreshold>(U, Id);
-      uint32_t Nc = plastix::GetField<InDegreeTag>(U, Id);
+      auto Threshold = plastax::GetField<ActThreshold>(U, Id);
+      uint32_t Nc = plastax::GetField<InDegreeTag>(U, Id);
       int Act = Nc > 0 ? static_cast<int>((Activation / Nc) > Threshold) : 0;
       G.WasActive |= (Act != 0); // benign: all writers store true
-      plastix::GetActivation(U, Id) = static_cast<float>(Act);
+      plastax::GetActivation(U, Id) = static_cast<float>(Act);
     } else {
-      uint32_t &P = plastix::GetField<Pulse>(U, Id);
-      uint32_t D = plastix::GetField<Delay>(U, Id);
-      plastix::GetActivation(U, Id) = static_cast<float>(P & 0x1u);
+      uint32_t &P = plastax::GetField<Pulse>(U, Id);
+      uint32_t D = plastax::GetField<Delay>(U, Id);
+      plastax::GetActivation(U, Id) = static_cast<float>(P & 0x1u);
       P = (P >> 1);
       if (Activation != 0) {
         G.WasActive = true;
@@ -165,15 +165,19 @@ struct ImprintingLearnerForward {
   }
 };
 
+// The TD error lives in the globals, not in a unit field, so the loss writes
+// no gradient seed (SeedField = void). The returned scalar is reporting only.
 struct ImprintingLearnerLoss {
-  static void CalculateLoss(auto &, plastix::UnitRange,
-                            std::span<const float> Targets,
-                            ImprintingLearnerGlobals &G) {
+  using SeedField = void;
+  static float CalculateLoss(auto &, plastax::UnitRange,
+                             std::span<const float> Targets,
+                             ImprintingLearnerGlobals &G) {
     float Reward = Targets[0];
     G.Delta = Reward + hp::Gamma * G.V - G.VOld;
     G.VDeltaPrev = G.VDelta;
     G.VDelta = 0.0f;
     G.B = 0.0f;
+    return 0.5f * G.Delta * G.Delta;
   }
 };
 
@@ -187,18 +191,18 @@ inline TenureStatus DetermineTenureState(float Weight) {
 }
 
 struct ImprintingLearnerUnitUpdate {
-  PLASTIX_HD static void Update(auto &UA, size_t Id, auto &) {
-    if (plastix::GetField<UKindTag>(UA, Id) == UK_Pattern)
-      plastix::GetField<UFlagsTags>(UA, Id).InputsAdded = true;
+  PLASTAX_HD static void Update(auto &UA, size_t Id, auto &) {
+    if (plastax::GetField<UKindTag>(UA, Id) == UK_Pattern)
+      plastax::GetField<UFlagsTags>(UA, Id).InputsAdded = true;
   }
 };
 
 struct ImprintingLearnerConnUpdate {
-  PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
+  PLASTAX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
                                        size_t SrcId,
                                        auto &C, size_t ConnId,
                                        ImprintingLearnerGlobals &G) {
-    using namespace plastix;
+    using namespace plastax;
     if (GetField<UKindTag>(U, DstId) != UK_Output)
       return;
 
@@ -244,11 +248,11 @@ struct ImprintingLearnerConnUpdate {
     AtomicAddGlobal(G.B, Z * F);
   }
 
-  PLASTIX_HD static void UpdateOutgoingConnection(auto &U, size_t SrcId,
+  PLASTAX_HD static void UpdateOutgoingConnection(auto &U, size_t SrcId,
                                        size_t DstId,
                                        auto &C, size_t ConnId,
                                        ImprintingLearnerGlobals &G) {
-    using namespace plastix;
+    using namespace plastax;
     if (GetField<UKindTag>(U, DstId) != UK_Output)
       return;
     const float F = GetActivation(U, SrcId);
@@ -300,17 +304,17 @@ struct ImprintingLearnerAddUnit {
                        ImprintingLearnerGlobals &G) {
     auto Sampled =
         std::bernoulli_distribution{0.5}(G.Rng) ? UK_Pattern : UK_Memory;
-    plastix::GetField<UKindTag>(U, Id) = Sampled;
+    plastax::GetField<UKindTag>(U, Id) = Sampled;
     if (Sampled == UK_Pattern) {
       constexpr float Thresholds[] = {0.6f, 0.7f, 0.8f, 0.9f};
       float Threshold =
           Thresholds[std::uniform_int_distribution<int>{0, 3}(G.Rng)];
-      plastix::GetField<ActThreshold>(U, Id) = Threshold;
-      plastix::GetActivation(U, Id) = 1.0f;
+      plastax::GetField<ActThreshold>(U, Id) = Threshold;
+      plastax::GetActivation(U, Id) = 1.0f;
     } else {
       int D = std::uniform_int_distribution<int>{1, 20}(G.Rng);
-      plastix::GetField<Delay>(U, Id) = D;
-      auto &P = plastix::GetField<Pulse>(U, Id);
+      plastax::GetField<Delay>(U, Id) = D;
+      auto &P = plastax::GetField<Pulse>(U, Id);
       P = P | 0x1u << D;
     }
   }
@@ -320,21 +324,21 @@ struct ImprintingLearnerAddConn {
   static bool ShouldAddIncomingConnection(auto &U, size_t Self,
                                           size_t Candidate,
                                           ImprintingLearnerGlobals &G) {
-    UnitKind SelfKind = plastix::GetField<UKindTag>(U, Self);
+    UnitKind SelfKind = plastax::GetField<UKindTag>(U, Self);
     if (SelfKind == UK_Output)
       return HandleConnsToOutput(U, Candidate);
 
-    UnitFlags &Flags = plastix::GetField<UFlagsTags>(U, Self);
+    UnitFlags &Flags = plastax::GetField<UFlagsTags>(U, Self);
     if (Flags.InputsAdded)
       return false;
 
-    UnitKind CandidateKind = plastix::GetField<UKindTag>(U, Candidate);
+    UnitKind CandidateKind = plastax::GetField<UKindTag>(U, Candidate);
     if (CandidateKind == UK_Output)
       return false;
 
-    bool CandidateWasActive = plastix::GetActivation(U, Candidate) != 0;
+    bool CandidateWasActive = plastax::GetActivation(U, Candidate) != 0;
     bool CandidateWasTenured =
-        plastix::GetField<Tenure>(U, Candidate) == TS_Tenured;
+        plastax::GetField<Tenure>(U, Candidate) == TS_Tenured;
     if (!CandidateWasActive || !CandidateWasTenured)
       return false;
 
@@ -349,7 +353,7 @@ struct ImprintingLearnerAddConn {
   }
 
   static bool HandleConnsToOutput(auto &U, size_t Candidate) {
-    UnitFlags &CandidateFlags = plastix::GetField<UFlagsTags>(U, Candidate);
+    UnitFlags &CandidateFlags = plastax::GetField<UFlagsTags>(U, Candidate);
     if (!CandidateFlags.OutputsAdded) {
       CandidateFlags.OutputsAdded = true;
       return true;
@@ -364,8 +368,8 @@ struct ImprintingLearnerAddConn {
 
   static void InitConnection(auto &UA, size_t, size_t To, auto &CA, size_t Conn,
                              ImprintingLearnerGlobals &) {
-    UnitKind ToKind = plastix::GetField<UKindTag>(UA, To);
-    plastix::GetWeight(CA, Conn) = (ToKind == UK_Output) ? 0.0f : 1.0f;
+    UnitKind ToKind = plastax::GetField<UKindTag>(UA, To);
+    plastax::GetWeight(CA, Conn) = (ToKind == UK_Output) ? 0.0f : 1.0f;
   }
 };
 
@@ -379,7 +383,7 @@ struct ImprintingLearnerResetGlobal {
 };
 
 struct ImprintingLearnerTraits
-    : plastix::DefaultNetworkTraits<ImprintingLearnerGlobals> {
+    : plastax::DefaultNetworkTraits<ImprintingLearnerGlobals> {
   using ForwardPass = ImprintingLearnerForward;
   using Loss = ImprintingLearnerLoss;
   using UpdateUnit = ImprintingLearnerUnitUpdate;
@@ -389,32 +393,37 @@ struct ImprintingLearnerTraits
   using AddConn = ImprintingLearnerAddConn;
   static constexpr bool KernelizeUpdate = true;  // forward+update on-device
   static constexpr bool KernelizeAdd = false;    // structural host (early-out)
+  // The forward, loss, update and add rules write the globals (G.V, G.Tau,
+  // G.B, G.VDelta, G.GenerationLeft, G.Rng, ...), so opt into mutable rule
+  // globals; the stateful growth predicate stays a bare legacy predicate on
+  // the host pair sweep (MaxLevelGap defaults to 1, the old Neighbourhood).
+  static constexpr bool MutableGlobalsInRules = true;
   // Per-unit reduction forward over the reverse-adjacency CSR — avoids the
   // per-edge atomicAdd contention when the output unit has ~N incoming edges.
   static constexpr bool ReverseAdjForward = false;
 
-  using ExtraConnFields = plastix::ConnFieldList<
-      plastix::alloc::SOAField<plastix::WeightTag, float>,
-      plastix::alloc::SOAField<ZTag, float>,
-      plastix::alloc::SOAField<ZDeltaTag, float>,
-      plastix::alloc::SOAField<DeltaWTag, float>,
-      plastix::alloc::SOAField<HTag, float>,
-      plastix::alloc::SOAField<HOldTag, float>,
-      plastix::alloc::SOAField<HTempTag, float>,
-      plastix::alloc::SOAField<ZBarTag, float>,
-      plastix::alloc::SOAField<PTag, float>,
-      plastix::alloc::SOAField<BetaTag, float>>;
+  using ExtraConnFields = plastax::ConnFieldList<
+      plastax::alloc::SOAField<plastax::WeightTag, float>,
+      plastax::alloc::SOAField<ZTag, float>,
+      plastax::alloc::SOAField<ZDeltaTag, float>,
+      plastax::alloc::SOAField<DeltaWTag, float>,
+      plastax::alloc::SOAField<HTag, float>,
+      plastax::alloc::SOAField<HOldTag, float>,
+      plastax::alloc::SOAField<HTempTag, float>,
+      plastax::alloc::SOAField<ZBarTag, float>,
+      plastax::alloc::SOAField<PTag, float>,
+      plastax::alloc::SOAField<BetaTag, float>>;
 
   using ExtraUnitFields =
-      plastix::UnitFieldList<plastix::alloc::SOAField<UKindTag, UnitKind>,
-                             plastix::alloc::SOAField<UFlagsTags, UnitFlags>,
-                             plastix::alloc::SOAField<Pulse, uint32_t>,
-                             plastix::alloc::SOAField<Delay, uint16_t>,
-                             plastix::alloc::SOAField<ActThreshold, float>,
-                             plastix::alloc::SOAField<Tenure, TenureStatus>,
-                             plastix::alloc::SOAField<InDegreeTag, uint32_t>>;
+      plastax::UnitFieldList<plastax::alloc::SOAField<UKindTag, UnitKind>,
+                             plastax::alloc::SOAField<UFlagsTags, UnitFlags>,
+                             plastax::alloc::SOAField<Pulse, uint32_t>,
+                             plastax::alloc::SOAField<Delay, uint16_t>,
+                             plastax::alloc::SOAField<ActThreshold, float>,
+                             plastax::alloc::SOAField<Tenure, TenureStatus>,
+                             plastax::alloc::SOAField<InDegreeTag, uint32_t>>;
 
-  static constexpr plastix::Propagation Model = plastix::Propagation::Pipeline;
+  static constexpr plastax::Propagation Model = plastax::Propagation::Pipeline;
   // 2500 input observations + headroom for generated patterns/memories
   // (gated by Tau < Eta so growth is throttled in practice). Override at
   // compile time for large-scale experiments, e.g. the ~1M-neuron sweep:
@@ -429,9 +438,9 @@ struct ImprintingLearnerTraits
   static constexpr size_t ConnCapacity = IL_CONN_CAPACITY;
 };
 
-static_assert(plastix::NetworkTraits<ImprintingLearnerTraits>);
+static_assert(plastax::NetworkTraits<ImprintingLearnerTraits>);
 
-using ImprintingLearner = plastix::Network<ImprintingLearnerTraits>;
+using ImprintingLearner = plastax::Network<ImprintingLearnerTraits>;
 
 // --- harness --------------------------------------------------------------
 
@@ -505,12 +514,12 @@ int main(int Argc, char **Argv) {
   auto Returns = ComputeReturns(Rewards, hp::Gamma);
   MP.EndDataset();
 
-  using FC = plastix::FullyConnected<ImprintingLearnerConnInit,
+  using FC = plastax::FullyConnected<ImprintingLearnerConnInit,
                                      ImprintingLearnerOutputUnitInit>;
   auto InputInit = [](auto &U, size_t Id) {
-    plastix::GetField<UFlagsTags>(U, Id).InputsAdded = true;
-    plastix::GetField<UFlagsTags>(U, Id).OutputsAdded = true;
-    plastix::GetField<Tenure>(U, Id) = TS_Tenured;
+    plastax::GetField<UFlagsTags>(U, Id).InputsAdded = true;
+    plastax::GetField<UFlagsTags>(U, Id).OutputsAdded = true;
+    plastax::GetField<Tenure>(U, Id) = TS_Tenured;
   };
 
   ImprintingLearner Net(DS.ObservationDim(), InputInit,
@@ -527,10 +536,10 @@ int main(int Argc, char **Argv) {
     auto &CA = Net.GetConnAlloc();
     size_t NU = UA.Size();
     std::vector<uint32_t> Offsets(NU + 1), Incoming(CA.Size()), WritePos(NU);
-    plastix::BuildReverseAdjacency(CA, NU, Offsets.data(), Incoming.data(),
+    plastax::BuildReverseAdjacency(CA, NU, Offsets.data(), Incoming.data(),
                                    WritePos.data());
     for (size_t I = 0; I < NU; ++I)
-      plastix::GetField<InDegreeTag>(UA, I) = Offsets[I + 1] - Offsets[I];
+      plastax::GetField<InDegreeTag>(UA, I) = Offsets[I + 1] - Offsets[I];
   }
   MP.EndWeights();
 

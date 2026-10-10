@@ -30,8 +30,8 @@
 
 #include "plastix/common.hpp"
 
-#include <plastix/math.hpp>
-#include <plastix/plastix.hpp>
+#include <plastax/math.hpp>
+#include <plastax/plastax.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -68,34 +68,34 @@ struct IsNewTag {};
 
 struct Forward {
   using Accumulator = float;
-  PLASTIX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
+  PLASTAX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
                               size_t ConnId, auto &) {
-    return plastix::GetWeight(C, ConnId) * plastix::GetActivation(U, SrcId);
+    return plastax::GetWeight(C, ConnId) * plastax::GetActivation(U, SrcId);
   }
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &, float Z) {
-    plastix::GetField<PreActTag>(U, Id) = Z;
-    plastix::GetActivation(U, Id) = plastix::GetField<IsOutputTag>(U, Id)
-                                        ? plastix::math::Linear(Z)
-                                        : plastix::math::ReLU(Z);
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &, float Z) {
+    plastax::GetField<PreActTag>(U, Id) = Z;
+    plastax::GetActivation(U, Id) = plastax::GetField<IsOutputTag>(U, Id)
+                                        ? plastax::math::Linear(Z)
+                                        : plastax::math::ReLU(Z);
   }
 };
 
 struct Backward {
   using Accumulator = float;
-  PLASTIX_HD static float Map(auto &U, size_t, size_t ToId, auto &C,
+  PLASTAX_HD static float Map(auto &U, size_t, size_t ToId, auto &C,
                               size_t ConnId, auto &) {
-    return plastix::GetWeight(C, ConnId) *
-           plastix::GetField<GradPreActTag>(U, ToId);
+    return plastax::GetWeight(C, ConnId) *
+           plastax::GetField<GradPreActTag>(U, ToId);
   }
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &, float Accumulated) {
-    bool IsOut = plastix::GetField<IsOutputTag>(U, Id);
-    float DLDA = IsOut ? plastix::GetBackwardAcc(U, Id) : Accumulated;
-    float Z = plastix::GetField<PreActTag>(U, Id);
-    float DPhiDz = IsOut ? plastix::math::LinearGrad(Z)
-                         : plastix::math::ReLUGradFromPreact(Z);
-    plastix::GetField<GradPreActTag>(U, Id) = DLDA * DPhiDz;
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &, float Accumulated) {
+    bool IsOut = plastax::GetField<IsOutputTag>(U, Id);
+    float DLDA = IsOut ? plastax::GetBackwardAcc(U, Id) : Accumulated;
+    float Z = plastax::GetField<PreActTag>(U, Id);
+    float DPhiDz = IsOut ? plastax::math::LinearGrad(Z)
+                         : plastax::math::ReLUGradFromPreact(Z);
+    plastax::GetField<GradPreActTag>(U, Id) = DLDA * DPhiDz;
   }
 };
 
@@ -115,14 +115,14 @@ struct BurstyGlobals {
 };
 
 struct UpdateConn {
-  PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
+  PLASTAX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
                                                   size_t SrcId, auto &C,
                                                   size_t ConnId, auto &G) {
-    float Grad = plastix::GetField<GradPreActTag>(U, DstId);
-    float A = plastix::GetActivation(U, SrcId);
-    plastix::GetWeight(C, ConnId) -= G.Lr * Grad * A;
+    float Grad = plastax::GetField<GradPreActTag>(U, DstId);
+    float A = plastax::GetActivation(U, SrcId);
+    plastax::GetWeight(C, ConnId) -= G.Lr * Grad * A;
   }
-  PLASTIX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
+  PLASTAX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
                                                   auto &, size_t, auto &) {}
 };
 
@@ -131,17 +131,17 @@ struct UpdateConn {
 // later in *this* step (by AddUnit::InitUnit) still see IsNew=true when
 // AddConn queries them seconds later.
 struct UpdateUnit {
-  PLASTIX_HD static void Update(auto &UA, size_t Id, auto &) {
-    plastix::GetField<IsNewTag>(UA, Id) = false;
+  PLASTAX_HD static void Update(auto &UA, size_t Id, auto &) {
+    plastax::GetField<IsNewTag>(UA, Id) = false;
   }
 };
 
 struct PruneConn {
-  PLASTIX_HD static bool ShouldPrune(auto &, size_t, size_t, auto &C,
+  PLASTAX_HD static bool ShouldPrune(auto &, size_t, size_t, auto &C,
                                      size_t ConnId, auto &G) {
     if (!G.PruneArmed)
       return false;
-    return std::abs(plastix::GetWeight(C, ConnId)) <= G.PruneThreshold;
+    return std::abs(plastax::GetWeight(C, ConnId)) <= G.PruneThreshold;
   }
 };
 
@@ -153,9 +153,9 @@ struct PruneConn {
 // function so the compiler doesn't read `AddUnit::AddUnit` as a
 // constructor.
 struct BurstAddUnit {
-  PLASTIX_HD static std::optional<int16_t> AddUnit(auto &UA, size_t ParentId,
+  PLASTAX_HD static std::optional<int16_t> AddUnit(auto &UA, size_t ParentId,
                                                     auto &G) {
-    uint16_t Lvl = plastix::GetLevel(UA, ParentId);
+    uint16_t Lvl = plastax::GetLevel(UA, ParentId);
     if (Lvl == G.AddHiddenL1 && G.AddBudgetL1 > 0) {
       --G.AddBudgetL1;
       return int16_t{0};
@@ -166,13 +166,13 @@ struct BurstAddUnit {
     }
     return std::nullopt;
   }
-  PLASTIX_HD static void InitUnit(auto &UA, size_t NewId, size_t /*Parent*/,
+  PLASTAX_HD static void InitUnit(auto &UA, size_t NewId, size_t /*Parent*/,
                                   auto &) {
-    plastix::GetActivation(UA, NewId) = 0.0f;
-    plastix::GetField<PreActTag>(UA, NewId) = 0.0f;
-    plastix::GetField<GradPreActTag>(UA, NewId) = 0.0f;
-    plastix::GetField<IsOutputTag>(UA, NewId) = false;
-    plastix::GetField<IsNewTag>(UA, NewId) = true;
+    plastax::GetActivation(UA, NewId) = 0.0f;
+    plastax::GetField<PreActTag>(UA, NewId) = 0.0f;
+    plastax::GetField<GradPreActTag>(UA, NewId) = 0.0f;
+    plastax::GetField<IsOutputTag>(UA, NewId) = false;
+    plastax::GetField<IsNewTag>(UA, NewId) = true;
   }
 };
 
@@ -182,78 +182,82 @@ struct BurstAddUnit {
 // endpoint carries IsNewTag. New units therefore gain edges to/from every
 // neighbour on both sides in a single burst step.
 struct BurstAddConn {
-  PLASTIX_HD static bool ShouldAddIncomingConnection(auto &UA, size_t SelfId,
+  // Candidates come from adjacent levels only (was Traits::Neighbourhood).
+  static constexpr uint16_t MaxLevelGap = 1;
+  PLASTAX_HD static bool ShouldAddIncomingConnection(auto &UA, size_t SelfId,
                                                      size_t CandidateId,
                                                      auto &G) {
     if (!G.AddConnEnabled)
       return false;
-    uint16_t SelfLvl = plastix::GetLevel(UA, SelfId);
-    uint16_t CandLvl = plastix::GetLevel(UA, CandidateId);
+    uint16_t SelfLvl = plastax::GetLevel(UA, SelfId);
+    uint16_t CandLvl = plastax::GetLevel(UA, CandidateId);
     if (CandLvl >= SelfLvl)
       return false; // only propose forward edges
-    bool SelfNew = plastix::GetField<IsNewTag>(UA, SelfId);
-    bool CandNew = plastix::GetField<IsNewTag>(UA, CandidateId);
+    bool SelfNew = plastax::GetField<IsNewTag>(UA, SelfId);
+    bool CandNew = plastax::GetField<IsNewTag>(UA, CandidateId);
     return SelfNew || CandNew;
   }
-  PLASTIX_HD static bool ShouldAddOutgoingConnection(auto &, size_t, size_t,
+  PLASTAX_HD static bool ShouldAddOutgoingConnection(auto &, size_t, size_t,
                                                      auto &) {
     return false;
   }
-  PLASTIX_HD static void InitConnection(auto &, size_t /*From*/, size_t /*To*/,
+  PLASTAX_HD static void InitConnection(auto &, size_t /*From*/, size_t /*To*/,
                                         auto &CA, size_t ConnId, auto &G) {
     uint64_t Counter = static_cast<uint64_t>(ConnId);
     // Small Gaussian-ish init via uniform[-0.05, 0.05], mirroring PyTorch's
     // `noise=0.05 * randn` magnitude.
-    plastix::GetWeight(CA, ConnId) =
-        plastix::UniformReal(G.AddConnSeed ^ 0xC3C3ull, Counter, -0.05f, 0.05f);
+    plastax::GetWeight(CA, ConnId) =
+        plastax::UniformReal(G.AddConnSeed ^ 0xC3C3ull, Counter, -0.05f, 0.05f);
   }
 };
 
-struct BurstyTraits : plastix::DefaultNetworkTraits<> {
+struct BurstyTraits : plastax::DefaultNetworkTraits<> {
   using GlobalState = BurstyGlobals;
   using ForwardPass = Forward;
   using BackwardPass = Backward;
-  using Loss = plastix::SoftmaxCrossEntropyLoss;
+  using Loss = plastax::SoftmaxCrossEntropyLoss;
   using UpdateUnit = ::UpdateUnit;
   using UpdateConn = ::UpdateConn;
   using PruneConn = ::PruneConn;
   using AddUnit = ::BurstAddUnit;
   using AddConn = ::BurstAddConn;
-  using ExtraUnitFields = plastix::UnitFieldList<
-      plastix::alloc::SOAField<PreActTag, float>,
-      plastix::alloc::SOAField<GradPreActTag, float>,
-      plastix::alloc::SOAField<IsOutputTag, bool>,
-      plastix::alloc::SOAField<IsNewTag, bool>>;
-  static constexpr uint16_t Neighbourhood = 1;
+  using ExtraUnitFields = plastax::UnitFieldList<
+      plastax::alloc::SOAField<PreActTag, float>,
+      plastax::alloc::SOAField<GradPreActTag, float>,
+      plastax::alloc::SOAField<IsOutputTag, bool>,
+      plastax::alloc::SOAField<IsNewTag, bool>>;
   // Headroom for a two-hidden-layer net that grows by ~15% per burst over
   // 30 bursts. Initial: 6 input + 32 + 32 + 2 = 72 units, plus growth to
   // ~80 per hidden layer caps at ~200 total. Edges scale to ~10k.
   static constexpr size_t UnitCapacity = 1024;
   static constexpr size_t ConnCapacity = 65536;
   // Burst arming lives in non-atomic statics — keep on host.
+  // BurstAddUnit decrements the per-layer add budgets in the globals, so the
+  // rules need a mutable GlobalState (host-only here anyway).
+  static constexpr bool MutableGlobalsInRules = true;
   static constexpr bool KernelizeAdd = false;
   static constexpr bool KernelizeUpdate = false;
 };
-static_assert(plastix::NetworkTraits<BurstyTraits>);
+static_assert(plastax::NetworkTraits<BurstyTraits>);
 
-using Net = plastix::Network<BurstyTraits>;
+using Net = plastax::Network<BurstyTraits>;
 
 struct UniformInit {
   uint64_t Seed;
   float Limit;
   void operator()(auto &CA, auto Id) const {
-    plastix::GetWeight(CA, Id) =
-        plastix::UniformReal(Seed, static_cast<uint64_t>(Id), -Limit, Limit);
+    plastax::GetWeight(CA, Id) =
+        plastax::UniformReal(Seed, static_cast<uint64_t>(Id), -Limit, Limit);
   }
 };
 struct MarkOutput {
   void operator()(auto &UA, auto Id) const {
-    plastix::GetField<IsOutputTag>(UA, Id) = true;
+    plastax::GetField<IsOutputTag>(UA, Id) = true;
   }
 };
 
-using FCHidden = plastix::FullyConnected<UniformInit>;
-using FCOut = plastix::FullyConnected<UniformInit, MarkOutput>;
+using FCHidden = plastax::FullyConnected<UniformInit>;
+using FCOut = plastax::FullyConnected<UniformInit, MarkOutput>;
 
 // --- data --------------------------------------------------------------------
 
@@ -420,8 +424,8 @@ template <typename N> static size_t MagnitudePrune(N &Net, float Frac) {
   std::vector<float> Alive;
   Alive.reserve(CA.Size());
   for (size_t C = 0; C < CA.Size(); ++C)
-    if (!plastix::GetField<plastix::DeadTag>(CA, C))
-      Alive.push_back(std::abs(plastix::GetWeight(CA, C)));
+    if (!plastax::GetField<plastax::DeadTag>(CA, C))
+      Alive.push_back(std::abs(plastax::GetWeight(CA, C)));
   if (Alive.empty())
     return 0;
   size_t K = std::max<size_t>(1, static_cast<size_t>(Frac * Alive.size()));
@@ -566,7 +570,7 @@ int main(int Argc, char **Argv) {
         size_t OldH1 = 0;
         auto &UA = N->GetUnitAlloc();
         for (size_t U = 0; U < UA.Size(); ++U)
-          if (plastix::GetLevel(UA, U) == N->Global().AddHiddenL1)
+          if (plastax::GetLevel(UA, U) == N->Global().AddHiddenL1)
             ++OldH1;
         int NNew = std::max(
             1, static_cast<int>(H.BurstFrac * static_cast<float>(OldH1)));
@@ -615,7 +619,7 @@ int main(int Argc, char **Argv) {
   S.Set("prunes_fired", static_cast<int>(Prunes));
   size_t HiddenFinal = 0;
   for (size_t U = 0; U < N->GetUnitAlloc().Size(); ++U) {
-    uint16_t Lvl = plastix::GetLevel(N->GetUnitAlloc(), U);
+    uint16_t Lvl = plastax::GetLevel(N->GetUnitAlloc(), U);
     if (Lvl == N->Global().AddHiddenL1 || Lvl == N->Global().AddHiddenL2)
       ++HiddenFinal;
   }

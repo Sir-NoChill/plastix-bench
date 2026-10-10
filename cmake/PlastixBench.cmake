@@ -6,7 +6,7 @@
 #     Creates a target named `plastix_<BENCH>`, output binary named
 #     `run_benchmark`, deposited at:
 #         <build>/<BENCH>/plastix/run_benchmark
-#     Linked against the Plastix library (imported target plastix::plastix)
+#     Linked against the Plastix library (imported target plastax::cpp)
 #     and, when CUDA is enabled in the Plastix build, the CUDA toolkit.
 #
 #   plastix_add_cpp_bench(BENCH SRC)
@@ -65,9 +65,9 @@ endfunction()
 # ----------------------------------------------------------------------------
 # Helper: compile a plastix/ bench target through nvcc.
 #
-# Mirrors Plastix's own plastix_enable_cuda_on_target. When the suite is built
+# Mirrors plastax-cpp's own plastax_enable_cuda_on_target. When the suite is built
 # with PLASTIX_BENCH_ENABLE_CUDA=ON the plastix/ TUs pull in CUB device code +
-# <<<>>> through the Plastix headers (guarded there by PLASTIX_HAS_CUDA), so
+# <<<>>> through the Plastix headers (guarded there by PLASTAX_HAS_CUDA), so
 # their .cpp sources must be handed to nvcc. A no-op when CUDA is off, so the
 # host build never touches the CUDA toolchain.
 # ----------------------------------------------------------------------------
@@ -102,7 +102,7 @@ function(plastix_add_plastix_bench BENCH SRC)
     target_include_directories(${_target} PRIVATE
         ${PLASTIX_BENCH_COMMON}
         ${PLASTIX_BENCH_ROOT}/${BENCH}/plastix)
-    target_link_libraries(${_target} PRIVATE plastix::plastix)
+    target_link_libraries(${_target} PRIVATE plastax::cpp)
     target_compile_options(${_target} PRIVATE -Wall -Wextra -Wpedantic)
     # Under PLASTIX_BENCH_ENABLE_CUDA, compile this TU with nvcc (no-op for the
     # host build).

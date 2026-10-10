@@ -32,8 +32,8 @@
 
 #include "plastix/common.hpp"
 
-#include <plastix/math.hpp>
-#include <plastix/plastix.hpp>
+#include <plastax/math.hpp>
+#include <plastax/plastax.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -80,34 +80,34 @@ struct LiveInDegreeTag {};
 
 struct Forward {
   using Accumulator = float;
-  PLASTIX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
+  PLASTAX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
                               size_t ConnId, auto &) {
-    return plastix::GetWeight(C, ConnId) * plastix::GetActivation(U, SrcId);
+    return plastax::GetWeight(C, ConnId) * plastax::GetActivation(U, SrcId);
   }
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &, float Z) {
-    plastix::GetField<PreActTag>(U, Id) = Z;
-    plastix::GetActivation(U, Id) = plastix::GetField<IsOutputTag>(U, Id)
-                                        ? plastix::math::Linear(Z)
-                                        : plastix::math::ReLU(Z);
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &, float Z) {
+    plastax::GetField<PreActTag>(U, Id) = Z;
+    plastax::GetActivation(U, Id) = plastax::GetField<IsOutputTag>(U, Id)
+                                        ? plastax::math::Linear(Z)
+                                        : plastax::math::ReLU(Z);
   }
 };
 
 struct Backward {
   using Accumulator = float;
-  PLASTIX_HD static float Map(auto &U, size_t, size_t ToId, auto &C,
+  PLASTAX_HD static float Map(auto &U, size_t, size_t ToId, auto &C,
                               size_t ConnId, auto &) {
-    return plastix::GetWeight(C, ConnId) *
-           plastix::GetField<GradPreActTag>(U, ToId);
+    return plastax::GetWeight(C, ConnId) *
+           plastax::GetField<GradPreActTag>(U, ToId);
   }
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &, float Accumulated) {
-    bool IsOut = plastix::GetField<IsOutputTag>(U, Id);
-    float DLDA = IsOut ? plastix::GetBackwardAcc(U, Id) : Accumulated;
-    float Z = plastix::GetField<PreActTag>(U, Id);
-    float DPhiDz = IsOut ? plastix::math::LinearGrad(Z)
-                         : plastix::math::ReLUGradFromPreact(Z);
-    plastix::GetField<GradPreActTag>(U, Id) = DLDA * DPhiDz;
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &, float Accumulated) {
+    bool IsOut = plastax::GetField<IsOutputTag>(U, Id);
+    float DLDA = IsOut ? plastax::GetBackwardAcc(U, Id) : Accumulated;
+    float Z = plastax::GetField<PreActTag>(U, Id);
+    float DPhiDz = IsOut ? plastax::math::LinearGrad(Z)
+                         : plastax::math::ReLUGradFromPreact(Z);
+    plastax::GetField<GradPreActTag>(U, Id) = DLDA * DPhiDz;
   }
 };
 
@@ -138,14 +138,14 @@ struct SplitGlobals {
 // G.ArgmaxId / G.ArgmaxVar are reset by the host before DoStep, then AddUnit
 // reads G.ArgmaxId at the AddUnit phase to pick the parent.
 struct UpdateUnit {
-  PLASTIX_HD static void Update(auto &UA, size_t Id, auto &G) {
+  PLASTAX_HD static void Update(auto &UA, size_t Id, auto &G) {
     // Clear the per-unit live-in-degree so UpdateConn can re-accumulate it
     // below. UpdateUnit fires before UpdateConn in DoStep ordering.
-    plastix::GetField<LiveInDegreeTag>(UA, Id) = 0;
-    if (plastix::GetLevel(UA, Id) != G.HiddenLevel)
+    plastax::GetField<LiveInDegreeTag>(UA, Id) = 0;
+    if (plastax::GetLevel(UA, Id) != G.HiddenLevel)
       return;
-    float A = plastix::GetActivation(UA, Id);
-    float &V = plastix::GetField<ActVarTag>(UA, Id);
+    float A = plastax::GetActivation(UA, Id);
+    float &V = plastax::GetField<ActVarTag>(UA, Id);
     V = (1.0f - G.Alpha) * V + G.Alpha * A * A;
     if (V > G.ArgmaxVar) {
       G.ArgmaxVar = V;
@@ -165,22 +165,22 @@ struct UpdateUnit {
 //     their destination. PruneConn fires later in the same DoStep and
 //     reads the resulting argmin id.
 struct UpdateConn {
-  PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
+  PLASTAX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
                                                   size_t SrcId, auto &C,
                                                   size_t ConnId, auto &G) {
-    ++plastix::GetField<LiveInDegreeTag>(U, DstId);
-    float Grad = plastix::GetField<GradPreActTag>(U, DstId);
-    float A = plastix::GetActivation(U, SrcId);
-    plastix::GetWeight(C, ConnId) -= G.Lr * Grad * A;
+    ++plastax::GetField<LiveInDegreeTag>(U, DstId);
+    float Grad = plastax::GetField<GradPreActTag>(U, DstId);
+    float A = plastax::GetActivation(U, SrcId);
+    plastax::GetWeight(C, ConnId) -= G.Lr * Grad * A;
   }
-  PLASTIX_HD static void UpdateOutgoingConnection(auto &U, size_t /*SrcId*/,
+  PLASTAX_HD static void UpdateOutgoingConnection(auto &U, size_t /*SrcId*/,
                                                   size_t DstId, auto &C,
                                                   size_t ConnId, auto &G) {
     // Don't even propose a connection for pruning if it's the only live
     // incoming edge of its destination — that's the orphan guard.
-    if (plastix::GetField<LiveInDegreeTag>(U, DstId) <= 1)
+    if (plastax::GetField<LiveInDegreeTag>(U, DstId) <= 1)
       return;
-    float Abs = std::abs(plastix::GetWeight(C, ConnId));
+    float Abs = std::abs(plastax::GetWeight(C, ConnId));
     if (Abs < G.ArgminAbs) {
       G.ArgminAbs = Abs;
       G.ArgminConnId = static_cast<int>(ConnId);
@@ -193,7 +193,7 @@ struct UpdateConn {
 // Forward -> Loss -> Backward -> UpdateUnit -> UpdateConn -> PruneUnit ->
 // PruneConn -> ... so the static is always fresh when ShouldPrune fires.
 struct PruneConn {
-  PLASTIX_HD static bool ShouldPrune(auto &, size_t, size_t, auto &,
+  PLASTAX_HD static bool ShouldPrune(auto &, size_t, size_t, auto &,
                                      size_t ConnId, auto &G) {
     return G.PruneArmed && static_cast<int>(ConnId) == G.ArgminConnId;
   }
@@ -203,109 +203,113 @@ struct PruneConn {
 // the argmax-variance unit picked by UpdateUnit. The static Armed flag is
 // reset right after AddUnits fires so only one spawn happens per step.
 struct SplitAddUnit {
-  PLASTIX_HD static std::optional<int16_t> AddUnit(auto &UA, size_t ParentId,
+  PLASTAX_HD static std::optional<int16_t> AddUnit(auto &UA, size_t ParentId,
                                                     auto &G) {
     if (!G.AddArmed)
       return std::nullopt;
-    if (plastix::GetLevel(UA, ParentId) != G.HiddenLevel)
+    if (plastax::GetLevel(UA, ParentId) != G.HiddenLevel)
       return std::nullopt;
     if (static_cast<int>(ParentId) != G.ArgmaxId)
       return std::nullopt;
     G.AddArmed = false; // single-shot
     return int16_t{0};
   }
-  PLASTIX_HD static void InitUnit(auto &UA, size_t NewId, size_t /*Parent*/,
+  PLASTAX_HD static void InitUnit(auto &UA, size_t NewId, size_t /*Parent*/,
                                   auto &) {
-    plastix::GetActivation(UA, NewId) = 0.0f;
-    plastix::GetField<PreActTag>(UA, NewId) = 0.0f;
-    plastix::GetField<GradPreActTag>(UA, NewId) = 0.0f;
-    plastix::GetField<IsOutputTag>(UA, NewId) = false;
-    plastix::GetField<ActVarTag>(UA, NewId) = 0.0f;
-    plastix::GetField<IsNewTag>(UA, NewId) = true;
+    plastax::GetActivation(UA, NewId) = 0.0f;
+    plastax::GetField<PreActTag>(UA, NewId) = 0.0f;
+    plastax::GetField<GradPreActTag>(UA, NewId) = 0.0f;
+    plastax::GetField<IsOutputTag>(UA, NewId) = false;
+    plastax::GetField<ActVarTag>(UA, NewId) = 0.0f;
+    plastax::GetField<IsNewTag>(UA, NewId) = true;
   }
 };
 
 // SplitAddConn — wires the freshly-allocated unit to every input (level 0)
 // and to every output (level >= HiddenLevel+1). The framework's
-// neighbourhood sweep iterates pairs by level distance, so Neighbourhood=1
+// neighbourhood sweep iterates pairs by level distance, so MaxLevelGap=1
 // reaches input -> hidden and hidden -> output. Uses the same per-step
 // IsNewTag pattern as workload 03.
 struct SplitAddConn {
-  PLASTIX_HD static bool ShouldAddIncomingConnection(auto &UA, size_t SelfId,
+  static constexpr uint16_t MaxLevelGap = 1;
+  PLASTAX_HD static bool ShouldAddIncomingConnection(auto &UA, size_t SelfId,
                                                      size_t CandidateId,
                                                      auto &) {
-    bool SelfNew = plastix::GetField<IsNewTag>(UA, SelfId);
-    bool SelfOut = plastix::GetField<IsOutputTag>(UA, SelfId);
-    bool CandNew = plastix::GetField<IsNewTag>(UA, CandidateId);
+    bool SelfNew = plastax::GetField<IsNewTag>(UA, SelfId);
+    bool SelfOut = plastax::GetField<IsOutputTag>(UA, SelfId);
+    bool CandNew = plastax::GetField<IsNewTag>(UA, CandidateId);
     // input -> new hidden (always — wire to every input).
-    if (SelfNew && plastix::GetLevel(UA, CandidateId) <
-                       plastix::GetLevel(UA, SelfId))
+    if (SelfNew && plastax::GetLevel(UA, CandidateId) <
+                       plastax::GetLevel(UA, SelfId))
       return true;
     // new hidden -> output.
     if (SelfOut && CandNew)
       return true;
     return false;
   }
-  PLASTIX_HD static bool ShouldAddOutgoingConnection(auto &, size_t, size_t,
+  PLASTAX_HD static bool ShouldAddOutgoingConnection(auto &, size_t, size_t,
                                                      auto &) {
     return false;
   }
-  PLASTIX_HD static void InitConnection(auto &, size_t /*From*/, size_t /*To*/,
+  PLASTAX_HD static void InitConnection(auto &, size_t /*From*/, size_t /*To*/,
                                         auto &CA, size_t ConnId, auto &G) {
     uint64_t Counter = static_cast<uint64_t>(ConnId);
-    plastix::GetWeight(CA, ConnId) =
-        plastix::UniformReal(G.AddConnSeed, Counter, -0.05f, 0.05f);
+    plastax::GetWeight(CA, ConnId) =
+        plastax::UniformReal(G.AddConnSeed, Counter, -0.05f, 0.05f);
   }
 };
 
-struct SplitTraits : plastix::DefaultNetworkTraits<> {
+struct SplitTraits : plastax::DefaultNetworkTraits<> {
   using GlobalState = SplitGlobals;
   using ForwardPass = Forward;
   using BackwardPass = Backward;
-  using Loss = plastix::MSELoss;
+  using Loss = plastax::MSELoss;
   using UpdateUnit = ::UpdateUnit;
   using UpdateConn = ::UpdateConn;
   using PruneConn = ::PruneConn;
   using AddUnit = ::SplitAddUnit;
   using AddConn = ::SplitAddConn;
-  using ExtraUnitFields = plastix::UnitFieldList<
-      plastix::alloc::SOAField<PreActTag, float>,
-      plastix::alloc::SOAField<GradPreActTag, float>,
-      plastix::alloc::SOAField<IsOutputTag, bool>,
-      plastix::alloc::SOAField<IsNewTag, bool>,
-      plastix::alloc::SOAField<ActVarTag, float>,
-      plastix::alloc::SOAField<LiveInDegreeTag, uint32_t>>;
-  static constexpr uint16_t Neighbourhood = 1;
+  using ExtraUnitFields = plastax::UnitFieldList<
+      plastax::alloc::SOAField<PreActTag, float>,
+      plastax::alloc::SOAField<GradPreActTag, float>,
+      plastax::alloc::SOAField<IsOutputTag, bool>,
+      plastax::alloc::SOAField<IsNewTag, bool>,
+      plastax::alloc::SOAField<ActVarTag, float>,
+      plastax::alloc::SOAField<LiveInDegreeTag, uint32_t>>;
   // PyTorch defaults: 27 input features (UCI Appliances), max_hidden=256,
   // 1 output. Initial edges ~ 27*32 + 32 = 896. Peak after splits to
   // max_hidden=256: 27*256 + 256 = 7168 edges. We size the conn alloc
   // bigger to cover the prune-add churn slack.
   static constexpr size_t UnitCapacity = 1024;
   static constexpr size_t ConnCapacity = 65536;
+  // UpdateUnit / UpdateConn / SplitAddUnit write the argmax/argmin scratch
+  // and the single-shot arming flag in the globals; the phases stay on the
+  // host (Kernelize*=false) so those sequential reductions are well-defined.
+  static constexpr bool MutableGlobalsInRules = true;
   static constexpr bool KernelizeUpdate = false;
   static constexpr bool KernelizeAdd = false;
   static constexpr bool KernelizePrune = false;
 };
-static_assert(plastix::NetworkTraits<SplitTraits>);
+static_assert(plastax::NetworkTraits<SplitTraits>);
 
-using Net = plastix::Network<SplitTraits>;
+using Net = plastax::Network<SplitTraits>;
 
 struct UniformInit {
   uint64_t Seed;
   float Limit;
   void operator()(auto &CA, auto Id) const {
-    plastix::GetWeight(CA, Id) =
-        plastix::UniformReal(Seed, static_cast<uint64_t>(Id), -Limit, Limit);
+    plastax::GetWeight(CA, Id) =
+        plastax::UniformReal(Seed, static_cast<uint64_t>(Id), -Limit, Limit);
   }
 };
 struct MarkOutput {
   void operator()(auto &UA, auto Id) const {
-    plastix::GetField<IsOutputTag>(UA, Id) = true;
+    plastax::GetField<IsOutputTag>(UA, Id) = true;
   }
 };
 
-using FCHidden = plastix::FullyConnected<UniformInit>;
-using FCOut = plastix::FullyConnected<UniformInit, MarkOutput>;
+using FCHidden = plastax::FullyConnected<UniformInit>;
+using FCOut = plastax::FullyConnected<UniformInit, MarkOutput>;
 
 // --- data ----------------------------------------------------------------
 
@@ -408,7 +412,7 @@ static void StandardiseY(std::vector<float> &Y, size_t Cut) {
 static void ClearIsNew(Net &N) {
   auto &UA = N.GetUnitAlloc();
   for (size_t I = 0; I < UA.Size(); ++I)
-    plastix::GetField<IsNewTag>(UA, I) = false;
+    plastax::GetField<IsNewTag>(UA, I) = false;
 }
 
 // PyTorch's `split_unit(idx)` is function-preserving:
@@ -437,33 +441,33 @@ static void RepairSplitWeights(Net &N, size_t ParentId, size_t NewId,
   std::unordered_map<uint32_t, float> ParentIncoming;
   std::unordered_map<uint32_t, float> ParentOutgoingHalved;
   for (size_t C = 0; C < CA.Size(); ++C) {
-    if (plastix::GetField<plastix::DeadTag>(CA, C))
+    if (plastax::GetField<plastax::DeadTag>(CA, C))
       continue;
-    uint32_t F = plastix::GetField<plastix::FromIdTag>(CA, C);
-    uint32_t T = plastix::GetField<plastix::ToIdTag>(CA, C);
+    uint32_t F = plastax::GetField<plastax::FromIdTag>(CA, C);
+    uint32_t T = plastax::GetField<plastax::ToIdTag>(CA, C);
     if (T == ParentId) {
-      ParentIncoming[F] = plastix::GetWeight(CA, C);
+      ParentIncoming[F] = plastax::GetWeight(CA, C);
     } else if (F == ParentId) {
-      float W = plastix::GetWeight(CA, C);
+      float W = plastax::GetWeight(CA, C);
       ParentOutgoingHalved[T] = W * 0.5f;
-      plastix::GetWeight(CA, C) = W * 0.5f;
+      plastax::GetWeight(CA, C) = W * 0.5f;
     }
   }
 
   // Pass 2: write the new unit's incoming/outgoing edges to match.
   for (size_t C = 0; C < CA.Size(); ++C) {
-    if (plastix::GetField<plastix::DeadTag>(CA, C))
+    if (plastax::GetField<plastax::DeadTag>(CA, C))
       continue;
-    uint32_t F = plastix::GetField<plastix::FromIdTag>(CA, C);
-    uint32_t T = plastix::GetField<plastix::ToIdTag>(CA, C);
+    uint32_t F = plastax::GetField<plastax::FromIdTag>(CA, C);
+    uint32_t T = plastax::GetField<plastax::ToIdTag>(CA, C);
     if (T == NewId) {
       auto It = ParentIncoming.find(F);
       if (It != ParentIncoming.end())
-        plastix::GetWeight(CA, C) = It->second + Gauss(Rng);
+        plastax::GetWeight(CA, C) = It->second + Gauss(Rng);
     } else if (F == NewId) {
       auto It = ParentOutgoingHalved.find(T);
       if (It != ParentOutgoingHalved.end())
-        plastix::GetWeight(CA, C) = It->second;
+        plastax::GetWeight(CA, C) = It->second;
     }
   }
   (void)UA;
@@ -592,7 +596,7 @@ int main(int Argc, char **Argv) {
     size_t HiddenWidth = 0;
     auto &UA = N->GetUnitAlloc();
     for (size_t U = 0; U < UA.Size(); ++U)
-      if (plastix::GetLevel(UA, U) == N->Global().HiddenLevel)
+      if (plastax::GetLevel(UA, U) == N->Global().HiddenLevel)
         ++HiddenWidth;
 
     bool WantSplit =
@@ -710,7 +714,7 @@ int main(int Argc, char **Argv) {
   S.Set("prunes_fired", static_cast<int>(Prunes));
   size_t HiddenFinal = 0;
   for (size_t U = 0; U < N->GetUnitAlloc().Size(); ++U)
-    if (plastix::GetLevel(N->GetUnitAlloc(), U) == N->Global().HiddenLevel)
+    if (plastax::GetLevel(N->GetUnitAlloc(), U) == N->Global().HiddenLevel)
       ++HiddenFinal;
   S.Set("hidden_final", static_cast<int>(HiddenFinal));
   S.Set("edges_final",

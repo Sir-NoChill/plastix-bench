@@ -28,8 +28,8 @@
 
 #include "plastix/common.hpp"
 
-#include <plastix/math.hpp>
-#include <plastix/plastix.hpp>
+#include <plastax/math.hpp>
+#include <plastax/plastax.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -64,34 +64,34 @@ struct IsOutputTag {};
 
 struct Forward {
   using Accumulator = float;
-  PLASTIX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
+  PLASTAX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
                               size_t ConnId, auto &) {
-    return plastix::GetWeight(C, ConnId) * plastix::GetActivation(U, SrcId);
+    return plastax::GetWeight(C, ConnId) * plastax::GetActivation(U, SrcId);
   }
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &, float Z) {
-    plastix::GetField<PreActTag>(U, Id) = Z;
-    plastix::GetActivation(U, Id) = plastix::GetField<IsOutputTag>(U, Id)
-                                        ? plastix::math::Linear(Z)
-                                        : plastix::math::ReLU(Z);
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &, float Z) {
+    plastax::GetField<PreActTag>(U, Id) = Z;
+    plastax::GetActivation(U, Id) = plastax::GetField<IsOutputTag>(U, Id)
+                                        ? plastax::math::Linear(Z)
+                                        : plastax::math::ReLU(Z);
   }
 };
 
 struct Backward {
   using Accumulator = float;
-  PLASTIX_HD static float Map(auto &U, size_t, size_t ToId, auto &C,
+  PLASTAX_HD static float Map(auto &U, size_t, size_t ToId, auto &C,
                               size_t ConnId, auto &) {
-    return plastix::GetWeight(C, ConnId) *
-           plastix::GetField<GradPreActTag>(U, ToId);
+    return plastax::GetWeight(C, ConnId) *
+           plastax::GetField<GradPreActTag>(U, ToId);
   }
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &, float Accumulated) {
-    bool IsOut = plastix::GetField<IsOutputTag>(U, Id);
-    float DLDA = IsOut ? plastix::GetBackwardAcc(U, Id) : Accumulated;
-    float Z = plastix::GetField<PreActTag>(U, Id);
-    float DPhiDz = IsOut ? plastix::math::LinearGrad(Z)
-                         : plastix::math::ReLUGradFromPreact(Z);
-    plastix::GetField<GradPreActTag>(U, Id) = DLDA * DPhiDz;
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &, float Accumulated) {
+    bool IsOut = plastax::GetField<IsOutputTag>(U, Id);
+    float DLDA = IsOut ? plastax::GetBackwardAcc(U, Id) : Accumulated;
+    float Z = plastax::GetField<PreActTag>(U, Id);
+    float DPhiDz = IsOut ? plastax::math::LinearGrad(Z)
+                         : plastax::math::ReLUGradFromPreact(Z);
+    plastax::GetField<GradPreActTag>(U, Id) = DLDA * DPhiDz;
   }
 };
 
@@ -105,64 +105,64 @@ struct IMPGlobals {
 };
 
 struct UpdateConn {
-  PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
+  PLASTAX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
                                                   size_t SrcId, auto &C,
                                                   size_t ConnId, auto &G) {
-    float Grad = plastix::GetField<GradPreActTag>(U, DstId);
-    float A = plastix::GetActivation(U, SrcId);
-    plastix::GetWeight(C, ConnId) -= G.Lr * Grad * A;
+    float Grad = plastax::GetField<GradPreActTag>(U, DstId);
+    float A = plastax::GetActivation(U, SrcId);
+    plastax::GetWeight(C, ConnId) -= G.Lr * Grad * A;
   }
-  PLASTIX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
+  PLASTAX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
                                                   auto &, size_t, auto &) {}
 };
 
 // PruneConn policy: only fires when armed. The host code arms it before
 // calling N.DoPruneConnections() between training rounds, then disarms.
 struct PruneConn {
-  PLASTIX_HD static bool ShouldPrune(auto &, size_t, size_t, auto &C,
+  PLASTAX_HD static bool ShouldPrune(auto &, size_t, size_t, auto &C,
                                      size_t ConnId, auto &G) {
     if (!G.PruneArmed)
       return false;
-    return std::abs(plastix::GetWeight(C, ConnId)) <= G.PruneThreshold;
+    return std::abs(plastax::GetWeight(C, ConnId)) <= G.PruneThreshold;
   }
 };
 
-struct IMPTraits : plastix::DefaultNetworkTraits<> {
+struct IMPTraits : plastax::DefaultNetworkTraits<> {
   using GlobalState = IMPGlobals;
   using ForwardPass = Forward;
   using BackwardPass = Backward;
-  using Loss = plastix::SoftmaxCrossEntropyLoss;
+  using Loss = plastax::SoftmaxCrossEntropyLoss;
   using UpdateConn = ::UpdateConn;
   using PruneConn = ::PruneConn;
-  using ExtraUnitFields = plastix::UnitFieldList<
-      plastix::alloc::SOAField<PreActTag, float>,
-      plastix::alloc::SOAField<GradPreActTag, float>,
-      plastix::alloc::SOAField<IsOutputTag, bool>>;
+  using ExtraUnitFields = plastax::UnitFieldList<
+      plastax::alloc::SOAField<PreActTag, float>,
+      plastax::alloc::SOAField<GradPreActTag, float>,
+      plastax::alloc::SOAField<IsOutputTag, bool>>;
   // PyTorch defaults: length=128 -> input 128, 3 hidden of 512, 5 outputs.
   // ~1669 units peak, ~592k initial connections.
   static constexpr size_t UnitCapacity = 4096;
   static constexpr size_t ConnCapacity = 1u << 20; // 1M
 };
-static_assert(plastix::NetworkTraits<IMPTraits>);
+static_assert(plastax::NetworkTraits<IMPTraits>);
 
-using Net = plastix::Network<IMPTraits>;
+using Net = plastax::Network<IMPTraits>;
 
 struct UniformInit {
   uint64_t Seed;
   float Limit;
   void operator()(auto &CA, auto Id) const {
-    plastix::GetWeight(CA, Id) =
-        plastix::UniformReal(Seed, static_cast<uint64_t>(Id), -Limit, Limit);
+    plastax::GetWeight(CA, Id) =
+        plastax::UniformReal(Seed, static_cast<uint64_t>(Id), -Limit, Limit);
   }
 };
 struct MarkOutput {
   void operator()(auto &UA, auto Id) const {
-    plastix::GetField<IsOutputTag>(UA, Id) = true;
+    plastax::GetField<IsOutputTag>(UA, Id) = true;
   }
 };
 
-using FCHidden = plastix::FullyConnected<UniformInit>;
-using FCOut = plastix::FullyConnected<UniformInit, MarkOutput>;
+using FCHidden = plastax::FullyConnected<UniformInit>;
+using FCOut = plastax::FullyConnected<UniformInit, MarkOutput>;
 
 // --- synthetic UCR-style multi-class shapelet data ---------------------------
 
@@ -254,9 +254,9 @@ static float ComputeThreshold(Net &N, float PruneFrac) {
   std::vector<float> AliveAbs;
   AliveAbs.reserve(CA.Size());
   for (size_t C = 0; C < CA.Size(); ++C) {
-    if (plastix::GetField<plastix::DeadTag>(CA, C))
+    if (plastax::GetField<plastax::DeadTag>(CA, C))
       continue;
-    AliveAbs.push_back(std::abs(plastix::GetWeight(CA, C)));
+    AliveAbs.push_back(std::abs(plastax::GetWeight(CA, C)));
   }
   if (AliveAbs.empty())
     return 0.0f;

@@ -19,8 +19,8 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # --- configuration ----------------------------------------------------------
 
 # Local Plastix checkout used as the from-source dependency (avoids a network
-# fetch). Override on the command line: `just plastix_src=/elsewhere build-all`.
-plastix_src := justfile_directory() / ".." / "plastix"
+# fetch). Override on the command line: `just plastax_cpp_src=/elsewhere build-all`.
+plastax_cpp_src := justfile_directory() / ".." / "plastix"
 
 # CUDA toolkit root (honoured by find_package(CUDAToolkit)).
 cuda_root := "/usr/local/cuda"
@@ -68,12 +68,12 @@ setup-audio DURATION="60" FREQ_BINS="50" MAG_BINS="50" SEED="42":
 
 # Configure the host-only (CPU) build.
 configure-cpu:
-    cmake -S . -B {{build_cpu}} -DPLASTIX_SOURCE_DIR="{{plastix_src}}"
+    cmake -S . -B {{build_cpu}} -DPLASTAX_CPP_SOURCE_DIR="{{plastax_cpp_src}}"
 
 # Configure the CUDA build (plastix/ TUs compiled by nvcc against CUDA Plastix).
 configure-cuda:
     cmake -S . -B {{build_cuda}} \
-        -DPLASTIX_SOURCE_DIR="{{plastix_src}}" \
+        -DPLASTAX_CPP_SOURCE_DIR="{{plastax_cpp_src}}" \
         -DPLASTIX_BENCH_ENABLE_CUDA=ON \
         -DCUDAToolkit_ROOT="{{cuda_root}}"
 

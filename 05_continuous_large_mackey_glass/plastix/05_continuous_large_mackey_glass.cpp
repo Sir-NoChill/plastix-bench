@@ -35,8 +35,8 @@
 
 #include "plastix/common.hpp"
 
-#include <plastix/math.hpp>
-#include <plastix/plastix.hpp>
+#include <plastax/math.hpp>
+#include <plastax/plastax.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -74,34 +74,34 @@ struct IsNewTag {};
 
 struct Forward {
   using Accumulator = float;
-  PLASTIX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
+  PLASTAX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
                               size_t ConnId, auto &) {
-    return plastix::GetWeight(C, ConnId) * plastix::GetActivation(U, SrcId);
+    return plastax::GetWeight(C, ConnId) * plastax::GetActivation(U, SrcId);
   }
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &, float Z) {
-    plastix::GetField<PreActTag>(U, Id) = Z;
-    plastix::GetActivation(U, Id) = plastix::GetField<IsOutputTag>(U, Id)
-                                        ? plastix::math::Linear(Z)
-                                        : plastix::math::Tanh(Z);
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &, float Z) {
+    plastax::GetField<PreActTag>(U, Id) = Z;
+    plastax::GetActivation(U, Id) = plastax::GetField<IsOutputTag>(U, Id)
+                                        ? plastax::math::Linear(Z)
+                                        : plastax::math::Tanh(Z);
   }
 };
 
 struct Backward {
   using Accumulator = float;
-  PLASTIX_HD static float Map(auto &U, size_t, size_t ToId, auto &C,
+  PLASTAX_HD static float Map(auto &U, size_t, size_t ToId, auto &C,
                               size_t ConnId, auto &) {
-    return plastix::GetWeight(C, ConnId) *
-           plastix::GetField<GradPreActTag>(U, ToId);
+    return plastax::GetWeight(C, ConnId) *
+           plastax::GetField<GradPreActTag>(U, ToId);
   }
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &, float Accumulated) {
-    bool IsOut = plastix::GetField<IsOutputTag>(U, Id);
-    float DLDA = IsOut ? plastix::GetBackwardAcc(U, Id) : Accumulated;
-    float Z = plastix::GetField<PreActTag>(U, Id);
-    float DPhiDz = IsOut ? plastix::math::LinearGrad(Z)
-                         : plastix::math::TanhGradFromPreact(Z);
-    plastix::GetField<GradPreActTag>(U, Id) = DLDA * DPhiDz;
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &, float Accumulated) {
+    bool IsOut = plastax::GetField<IsOutputTag>(U, Id);
+    float DLDA = IsOut ? plastax::GetBackwardAcc(U, Id) : Accumulated;
+    float Z = plastax::GetField<PreActTag>(U, Id);
+    float DPhiDz = IsOut ? plastax::math::LinearGrad(Z)
+                         : plastax::math::TanhGradFromPreact(Z);
+    plastax::GetField<GradPreActTag>(U, Id) = DLDA * DPhiDz;
   }
 };
 
@@ -121,27 +121,28 @@ struct MgGlobals {
   uint64_t AddConnSeed = 0;      // MgAddConn
   bool RewireAddEnabled = false; // MgAddConn
   float RewireDensity = 0.0f;    // MgAddConn
+  uint32_t NumInput = 0;         // MgAddConn: ids [0, NumInput) are inputs
 };
 
 struct UpdateConn {
-  PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
+  PLASTAX_HD static void UpdateIncomingConnection(auto &U, size_t DstId,
                                                   size_t SrcId, auto &C,
                                                   size_t ConnId, auto &G) {
-    float Grad = plastix::GetField<GradPreActTag>(U, DstId);
-    float A = plastix::GetActivation(U, SrcId);
-    plastix::GetWeight(C, ConnId) -= G.Lr * Grad * A;
+    float Grad = plastax::GetField<GradPreActTag>(U, DstId);
+    float A = plastax::GetActivation(U, SrcId);
+    plastax::GetWeight(C, ConnId) -= G.Lr * Grad * A;
   }
-  PLASTIX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
+  PLASTAX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
                                                   auto &, size_t, auto &) {}
 };
 
 // PruneUnit — fires while ShrinkBudget > 0. Filters to hidden-level units
 // only. Decrements the static budget on each fire.
 struct PruneUnit {
-  PLASTIX_HD static bool ShouldPrune(auto &UA, size_t Id, auto &G) {
+  PLASTAX_HD static bool ShouldPrune(auto &UA, size_t Id, auto &G) {
     if (G.ShrinkBudget <= 0)
       return false;
-    if (plastix::GetLevel(UA, Id) != G.HiddenLevel)
+    if (plastax::GetLevel(UA, Id) != G.HiddenLevel)
       return false;
     --G.ShrinkBudget;
     return true;
@@ -152,11 +153,11 @@ struct PruneUnit {
 // per-conn coin flip seeded by ConnId so the result is deterministic but
 // scattered across the connection space.
 struct PruneConn {
-  PLASTIX_HD static bool ShouldPrune(auto &, size_t, size_t, auto &,
+  PLASTAX_HD static bool ShouldPrune(auto &, size_t, size_t, auto &,
                                      size_t ConnId, auto &G) {
     if (G.RewireBudget <= 0)
       return false;
-    if (plastix::Bernoulli(G.RewireSeed, static_cast<uint64_t>(ConnId),
+    if (plastax::Bernoulli(G.RewireSeed, static_cast<uint64_t>(ConnId),
                            G.RewireBias)) {
       --G.RewireBudget;
       return true;
@@ -169,22 +170,22 @@ struct PruneConn {
 // multi-fire budget instead of one-at-a-time. Heavy-tail Pareto magnitudes
 // from the host become a one-step burst of variable size.
 struct MgAddUnit {
-  PLASTIX_HD static std::optional<int16_t> AddUnit(auto &UA, size_t ParentId,
+  PLASTAX_HD static std::optional<int16_t> AddUnit(auto &UA, size_t ParentId,
                                                     auto &G) {
     if (G.AddBudget <= 0)
       return std::nullopt;
-    if (plastix::GetLevel(UA, ParentId) != G.HiddenLevel)
+    if (plastax::GetLevel(UA, ParentId) != G.HiddenLevel)
       return std::nullopt;
     --G.AddBudget;
     return int16_t{0};
   }
-  PLASTIX_HD static void InitUnit(auto &UA, size_t NewId, size_t /*Parent*/,
+  PLASTAX_HD static void InitUnit(auto &UA, size_t NewId, size_t /*Parent*/,
                                   auto &) {
-    plastix::GetActivation(UA, NewId) = 0.0f;
-    plastix::GetField<PreActTag>(UA, NewId) = 0.0f;
-    plastix::GetField<GradPreActTag>(UA, NewId) = 0.0f;
-    plastix::GetField<IsOutputTag>(UA, NewId) = false;
-    plastix::GetField<IsNewTag>(UA, NewId) = true;
+    plastax::GetActivation(UA, NewId) = 0.0f;
+    plastax::GetField<PreActTag>(UA, NewId) = 0.0f;
+    plastax::GetField<GradPreActTag>(UA, NewId) = 0.0f;
+    plastax::GetField<IsOutputTag>(UA, NewId) = false;
+    plastax::GetField<IsNewTag>(UA, NewId) = true;
   }
 };
 
@@ -194,56 +195,66 @@ struct MgAddUnit {
 //   - When RewireAddEnabled is true, also propose a small number of new
 //     random input -> hidden edges to compensate for the rewire's prune.
 struct MgAddConn {
-  PLASTIX_HD static bool ShouldAddIncomingConnection(auto &UA, size_t SelfId,
+  static constexpr uint16_t MaxLevelGap = 1;
+  PLASTAX_HD static bool ShouldAddIncomingConnection(auto &UA, size_t SelfId,
                                                      size_t CandidateId,
                                                      auto &G) {
-    bool SelfNew = plastix::GetField<IsNewTag>(UA, SelfId);
-    bool SelfOut = plastix::GetField<IsOutputTag>(UA, SelfId);
-    bool CandNew = plastix::GetField<IsNewTag>(UA, CandidateId);
-    if (SelfNew && plastix::GetLevel(UA, CandidateId) <
-                       plastix::GetLevel(UA, SelfId))
+    bool SelfNew = plastax::GetField<IsNewTag>(UA, SelfId);
+    bool SelfOut = plastax::GetField<IsOutputTag>(UA, SelfId);
+    bool CandNew = plastax::GetField<IsNewTag>(UA, CandidateId);
+    // The input-side wiring takes true inputs only. A hidden unit whose
+    // incoming edges were all rewired away recomputes to level 0, and
+    // admitting it as an "input" grew hidden <-> hidden 2-cycles, which the
+    // topological level schedule cannot represent (plastax-cpp now rejects
+    // them at the resort; the old library silently flattened them).
+    bool CandInput = CandidateId < G.NumInput;
+    if (SelfNew && CandInput &&
+        plastax::GetLevel(UA, CandidateId) < plastax::GetLevel(UA, SelfId))
       return true;
     if (SelfOut && CandNew)
       return true;
-    if (G.RewireAddEnabled &&
-        plastix::GetLevel(UA, CandidateId) <
-            plastix::GetLevel(UA, SelfId) &&
-        plastix::GetLevel(UA, SelfId) == G.HiddenLevel) {
+    if (G.RewireAddEnabled && CandInput &&
+        plastax::GetLevel(UA, CandidateId) <
+            plastax::GetLevel(UA, SelfId) &&
+        plastax::GetLevel(UA, SelfId) == G.HiddenLevel) {
       uint64_t Counter = (static_cast<uint64_t>(SelfId) << 32) |
                          static_cast<uint64_t>(CandidateId);
-      return plastix::Bernoulli(G.AddConnSeed ^ 0xDEADBEEFull, Counter,
+      return plastax::Bernoulli(G.AddConnSeed ^ 0xDEADBEEFull, Counter,
                                 G.RewireDensity);
     }
     return false;
   }
-  PLASTIX_HD static bool ShouldAddOutgoingConnection(auto &, size_t, size_t,
+  PLASTAX_HD static bool ShouldAddOutgoingConnection(auto &, size_t, size_t,
                                                      auto &) {
     return false;
   }
-  PLASTIX_HD static void InitConnection(auto &, size_t /*From*/, size_t /*To*/,
+  PLASTAX_HD static void InitConnection(auto &, size_t /*From*/, size_t /*To*/,
                                         auto &CA, size_t ConnId, auto &G) {
     uint64_t Counter = static_cast<uint64_t>(ConnId);
-    plastix::GetWeight(CA, ConnId) =
-        plastix::UniformReal(G.AddConnSeed, Counter, -0.05f, 0.05f);
+    plastax::GetWeight(CA, ConnId) =
+        plastax::UniformReal(G.AddConnSeed, Counter, -0.05f, 0.05f);
   }
 };
 
-struct MgTraits : plastix::DefaultNetworkTraits<> {
+struct MgTraits : plastax::DefaultNetworkTraits<> {
   using GlobalState = MgGlobals;
   using ForwardPass = Forward;
   using BackwardPass = Backward;
-  using Loss = plastix::MSELoss;
+  using Loss = plastax::MSELoss;
   using UpdateConn = ::UpdateConn;
   using PruneUnit = ::PruneUnit;
   using PruneConn = ::PruneConn;
   using AddUnit = ::MgAddUnit;
   using AddConn = ::MgAddConn;
-  using ExtraUnitFields = plastix::UnitFieldList<
-      plastix::alloc::SOAField<PreActTag, float>,
-      plastix::alloc::SOAField<GradPreActTag, float>,
-      plastix::alloc::SOAField<IsOutputTag, bool>,
-      plastix::alloc::SOAField<IsNewTag, bool>>;
-  static constexpr uint16_t Neighbourhood = 1;
+  using ExtraUnitFields = plastax::UnitFieldList<
+      plastax::alloc::SOAField<PreActTag, float>,
+      plastax::alloc::SOAField<GradPreActTag, float>,
+      plastax::alloc::SOAField<IsOutputTag, bool>,
+      plastax::alloc::SOAField<IsNewTag, bool>>;
+  // PruneUnit / PruneConn / MgAddUnit decrement their budgets in the
+  // globals; the phases stay on the host (Kernelize*=false) so the
+  // decrements are sequential and well-defined.
+  static constexpr bool MutableGlobalsInRules = true;
   static constexpr bool KernelizeUpdate = false;
   static constexpr bool KernelizeAdd = false;
   static constexpr bool KernelizePrune = false;
@@ -254,26 +265,26 @@ struct MgTraits : plastix::DefaultNetworkTraits<> {
   static constexpr size_t UnitCapacity = 4096;
   static constexpr size_t ConnCapacity = 65536;
 };
-static_assert(plastix::NetworkTraits<MgTraits>);
+static_assert(plastax::NetworkTraits<MgTraits>);
 
-using Net = plastix::Network<MgTraits>;
+using Net = plastax::Network<MgTraits>;
 
 struct UniformInit {
   uint64_t Seed;
   float Limit;
   void operator()(auto &CA, auto Id) const {
-    plastix::GetWeight(CA, Id) =
-        plastix::UniformReal(Seed, static_cast<uint64_t>(Id), -Limit, Limit);
+    plastax::GetWeight(CA, Id) =
+        plastax::UniformReal(Seed, static_cast<uint64_t>(Id), -Limit, Limit);
   }
 };
 struct MarkOutput {
   void operator()(auto &UA, auto Id) const {
-    plastix::GetField<IsOutputTag>(UA, Id) = true;
+    plastax::GetField<IsOutputTag>(UA, Id) = true;
   }
 };
 
-using FCHidden = plastix::FullyConnected<UniformInit>;
-using FCOut = plastix::FullyConnected<UniformInit, MarkOutput>;
+using FCHidden = plastax::FullyConnected<UniformInit>;
+using FCOut = plastax::FullyConnected<UniformInit, MarkOutput>;
 
 // --- Mackey-Glass series --------------------------------------------------
 
@@ -348,15 +359,15 @@ static double EvalMse(Net &N,
 static void ClearIsNew(Net &N) {
   auto &UA = N.GetUnitAlloc();
   for (size_t I = 0; I < UA.Size(); ++I)
-    plastix::GetField<IsNewTag>(UA, I) = false;
+    plastax::GetField<IsNewTag>(UA, I) = false;
 }
 
 static size_t CountHidden(Net &N) {
   size_t H = 0;
   auto &UA = N.GetUnitAlloc();
   for (size_t I = 0; I < UA.Size(); ++I)
-    if (plastix::GetLevel(UA, I) == N.Global().HiddenLevel &&
-        !plastix::GetField<plastix::PrunedTag>(UA, I))
+    if (plastax::GetLevel(UA, I) == N.Global().HiddenLevel &&
+        !plastax::GetField<plastax::PrunedTag>(UA, I))
       ++H;
   return H;
 }
@@ -432,6 +443,7 @@ int main(int Argc, char **Argv) {
   N->Global().AddConnSeed = static_cast<uint64_t>(Args.Seed) * 1000ull + 29ull;
   N->Global().RewireSeed = N->Global().AddConnSeed ^ 0xC0FFEEull;
   N->Global().RewireDensity = H.RewireFrac;
+  N->Global().NumInput = static_cast<uint32_t>(H.InLen);
 
   std::mt19937 Rng(static_cast<uint32_t>(Args.Seed));
   std::uniform_real_distribution<float> Coin(0.0f, 1.0f);

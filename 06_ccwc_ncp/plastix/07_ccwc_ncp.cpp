@@ -25,8 +25,8 @@
 
 #include "plastix/common.hpp"
 
-#include <plastix/math.hpp>
-#include <plastix/plastix.hpp>
+#include <plastax/math.hpp>
+#include <plastax/plastax.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -114,14 +114,14 @@ struct LtcForward {
   // excite or inhibit depending on the source's sign. Wired here as
   // tanh(x_src) (γ=1, μ=0) to keep the gradient computation symmetric
   // and well-conditioned.
-  PLASTIX_HD static LtcAcc Map(auto &U, size_t /*Dst*/, size_t Src,
+  PLASTAX_HD static LtcAcc Map(auto &U, size_t /*Dst*/, size_t Src,
                                auto &C, size_t Cid, auto &) {
-    float Xs = plastix::GetActivation(U, Src);
-    float W  = plastix::GetWeight(C, Cid);
+    float Xs = plastax::GetActivation(U, Src);
+    float W  = plastax::GetWeight(C, Cid);
     return LtcAcc{W * std::tanh(Xs)};
   }
 
-  PLASTIX_HD static LtcAcc Combine(LtcAcc A, LtcAcc B) {
+  PLASTAX_HD static LtcAcc Combine(LtcAcc A, LtcAcc B) {
     return LtcAcc{A.Drive + B.Drive};
   }
 
@@ -130,16 +130,16 @@ struct LtcForward {
   // [−1, 1] (sin/cos), so a tanh-saturated readout is in the right
   // range. A linear motor unit would let the recurrent motor→command
   // feedback drive unbounded activations within a few steps.
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &G, LtcAcc Acc) {
-    float Tau = plastix::GetField<TauTag>(U, Id);
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &G, LtcAcc Acc) {
+    float Tau = plastax::GetField<TauTag>(U, Id);
     if (Tau <= 0.0f) Tau = 1.0f;
     float Alpha = std::exp(-G.Dt / Tau);
-    float Xprev = plastix::GetActivation(U, Id);
+    float Xprev = plastax::GetActivation(U, Id);
     float Pre   = Alpha * Xprev + Acc.Drive;
     float Xnew  = std::tanh(Pre);
-    plastix::GetActivation(U, Id)         = Xnew;
-    plastix::GetField<LastDenomTag>(U, Id) = Alpha;        // saved for e-prop
-    plastix::GetField<LastFsumTag>(U, Id)  = Acc.Drive;    // diagnostic
+    plastax::GetActivation(U, Id)         = Xnew;
+    plastax::GetField<LastDenomTag>(U, Id) = Alpha;        // saved for e-prop
+    plastax::GetField<LastFsumTag>(U, Id)  = Acc.Drive;    // diagnostic
   }
 };
 
@@ -152,18 +152,18 @@ struct LtcBackward {
   // trace later — Sens carries it for the source-side multiplication;
   // here we carry it for the destination-side propagation. Symmetric
   // feedback (random-feedback alignment is a future extension).
-  PLASTIX_HD static float Map(auto &U, size_t /*Src*/, size_t Dst,
+  PLASTAX_HD static float Map(auto &U, size_t /*Src*/, size_t Dst,
                               auto &C, size_t Cid, auto &) {
-    float W    = plastix::GetWeight(C, Cid);
-    float Xdst = plastix::GetActivation(U, Dst);
+    float W    = plastax::GetWeight(C, Cid);
+    float Xdst = plastax::GetActivation(U, Dst);
     float PhiP = 1.0f - Xdst * Xdst;
-    return W * PhiP * plastix::GetField<LearningSignalTag>(U, Dst);
+    return W * PhiP * plastax::GetField<LearningSignalTag>(U, Dst);
   }
 
-  PLASTIX_HD static float Combine(float A, float B) { return A + B; }
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
 
-  PLASTIX_HD static void Apply(auto &U, size_t Id, auto &, float Up) {
-    auto K = plastix::GetField<KindTag>(U, Id);
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &, float Up) {
+    auto K = plastax::GetField<KindTag>(U, Id);
     // Motor: fresh dL/dActivation staged by the loss this step.
     // Everyone else: the projected sum from outgoing edges, which is
     // one step lagged (Map reads last step's LearningSignalTag) — that
@@ -172,9 +172,9 @@ struct LtcBackward {
     // id 0); their KindTag stays at the default 0 (Sensory), value
     // unread elsewhere — harmless.
     float Signal = (K == static_cast<uint8_t>(Kind::Motor))
-                       ? plastix::GetBackwardAcc(U, Id)
+                       ? plastax::GetBackwardAcc(U, Id)
                        : Up;
-    plastix::GetField<LearningSignalTag>(U, Id) = Signal;
+    plastax::GetField<LearningSignalTag>(U, Id) = Signal;
   }
 };
 
@@ -185,10 +185,10 @@ struct EpropUpdate {
   // sensitivity of x_new to w_ij is
   //   ∂x_new/∂w_ij = φ'(z_i) · tanh(x_src),
   // and the trace accumulates this with β decay across steps.
-  PLASTIX_HD static void UpdateIncomingConnection(auto &U, size_t Dst,
+  PLASTAX_HD static void UpdateIncomingConnection(auto &U, size_t Dst,
                                                   size_t Src, auto &C,
                                                   size_t Cid, auto &G) {
-    using namespace plastix;
+    using namespace plastax;
     float Xs   = GetActivation(U, Src);
     float Hpre = std::tanh(Xs);                  // pre-synaptic activation
     float Xnew = GetActivation(U, Dst);
@@ -210,7 +210,7 @@ struct EpropUpdate {
     GetWeight(C, Cid) = Wnew;
   }
 
-  PLASTIX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
+  PLASTAX_HD static void UpdateOutgoingConnection(auto &, size_t, size_t,
                                                   auto &, size_t, auto &) {}
 };
 
@@ -218,41 +218,41 @@ struct EpropUpdate {
 // Traits
 // ---------------------------------------------------------------------------
 
-struct CcwcTraits : plastix::DefaultNetworkTraits<> {
+struct CcwcTraits : plastax::DefaultNetworkTraits<> {
   using GlobalState  = Hyper;
   using ForwardPass  = LtcForward;
   using BackwardPass = LtcBackward;
-  using Loss         = plastix::MSELoss;
+  using Loss         = plastax::MSELoss;
   using UpdateConn   = EpropUpdate;
 
-  static constexpr plastix::Propagation Model = plastix::Propagation::Pipeline;
+  static constexpr plastax::Propagation Model = plastax::Propagation::Pipeline;
 
-  using ExtraUnitFields = plastix::UnitFieldList<
-      plastix::alloc::SOAField<TauTag,             float>,
-      plastix::alloc::SOAField<KindTag,            uint8_t>,
-      plastix::alloc::SOAField<LearningSignalTag,  float>,
-      plastix::alloc::SOAField<LastDenomTag,       float>,
-      plastix::alloc::SOAField<LastFsumTag,        float>>;
+  using ExtraUnitFields = plastax::UnitFieldList<
+      plastax::alloc::SOAField<TauTag,             float>,
+      plastax::alloc::SOAField<KindTag,            uint8_t>,
+      plastax::alloc::SOAField<LearningSignalTag,  float>,
+      plastax::alloc::SOAField<LastDenomTag,       float>,
+      plastax::alloc::SOAField<LastFsumTag,        float>>;
 
-  using ExtraConnFields = plastix::ConnFieldList<
-      plastix::alloc::SOAField<plastix::WeightTag, float>,
-      plastix::alloc::SOAField<GammaTag,           float>,
-      plastix::alloc::SOAField<MuTag,              float>,
-      plastix::alloc::SOAField<EligibilityTag,     float>>;
+  using ExtraConnFields = plastax::ConnFieldList<
+      plastax::alloc::SOAField<plastax::WeightTag, float>,
+      plastax::alloc::SOAField<GammaTag,           float>,
+      plastax::alloc::SOAField<MuTag,              float>,
+      plastax::alloc::SOAField<EligibilityTag,     float>>;
 
   // ~tens of NCP neurons, hundreds-to-low-thousands of edges. Headroom for
   // a 64-unit sweep; bump if you push --units higher.
   static constexpr size_t UnitCapacity = 256;
   static constexpr size_t ConnCapacity = 4096;
 };
-static_assert(plastix::NetworkTraits<CcwcTraits>);
+static_assert(plastax::NetworkTraits<CcwcTraits>);
 
-using Net = plastix::Network<CcwcTraits>;
+using Net = plastax::Network<CcwcTraits>;
 
 // ---------------------------------------------------------------------------
 // Custom LayerBuilder: builds the entire NCP wiring in one call.
 // The graph has recurrent and feedback edges, so it can't be decomposed
-// into stacked plastix::FullyConnected layers.
+// into stacked plastax::FullyConnected layers.
 // ---------------------------------------------------------------------------
 
 struct NCPWiringBuilder {
@@ -290,9 +290,9 @@ struct NCPWiringBuilder {
   }
 
   template <typename UA, typename CA>
-  plastix::UnitRange operator()(UA &Ua, CA &Ca,
-                                plastix::UnitRange Inputs) const {
-    using namespace plastix;
+  plastax::UnitRange operator()(UA &Ua, CA &Ca,
+                                plastax::UnitRange Inputs) const {
+    using namespace plastax;
     auto P = ComputePartition();
     uint16_t SrcLevel = GetLevel(Ua, Inputs.Begin);
     uint16_t Layer1   = SrcLevel + 1;
@@ -331,7 +331,7 @@ struct NCPWiringBuilder {
     };
 
     // Sample K distinct ids from `Pool`, excluding `Forbidden` if present.
-    auto SampleK = [&](plastix::UnitRange Pool, size_t K,
+    auto SampleK = [&](plastax::UnitRange Pool, size_t K,
                        size_t Forbidden) -> std::vector<size_t> {
       std::vector<size_t> Ids;
       Ids.reserve(Pool.Size());
@@ -404,18 +404,18 @@ static void ResetPerSequence(Net &N, size_t NumInput) {
   auto &Ca = N.GetConnAlloc();
   size_t Nu = Ua.Size();
   for (size_t Id = NumInput; Id < Nu; ++Id) {
-    plastix::GetActivation(Ua, Id) = 0.0f;
-    plastix::GetField<LearningSignalTag>(Ua, Id) = 0.0f;
-    plastix::GetField<LastDenomTag>(Ua, Id) = 1.0f;
-    plastix::GetField<LastFsumTag>(Ua, Id) = 0.0f;
-    plastix::GetForwardAcc(Ua, Id) = LtcAcc{};
-    plastix::GetBackwardAcc(Ua, Id) = 0.0f;
+    plastax::GetActivation(Ua, Id) = 0.0f;
+    plastax::GetField<LearningSignalTag>(Ua, Id) = 0.0f;
+    plastax::GetField<LastDenomTag>(Ua, Id) = 1.0f;
+    plastax::GetField<LastFsumTag>(Ua, Id) = 0.0f;
+    plastax::GetForwardAcc(Ua, Id) = LtcAcc{};
+    plastax::GetField<plastax::BackwardAccTag>(Ua, Id) = 0.0f;
   }
   size_t Nc = Ca.Size();
   for (size_t Cid = 0; Cid < Nc; ++Cid) {
-    if (plastix::GetField<plastix::DeadTag>(Ca, Cid))
+    if (plastax::GetField<plastax::DeadTag>(Ca, Cid))
       continue;
-    plastix::GetField<EligibilityTag>(Ca, Cid) = 0.0f;
+    plastax::GetField<EligibilityTag>(Ca, Cid) = 0.0f;
   }
 }
 
@@ -723,19 +723,19 @@ int main(int Argc, char **Argv) {
     auto &Ca = N->GetConnAlloc();
     auto &Ua = N->GetUnitAlloc();
     for (size_t Cid = 0; Cid < Ca.Size(); ++Cid) {
-      if (plastix::GetField<plastix::DeadTag>(Ca, Cid))
+      if (plastax::GetField<plastax::DeadTag>(Ca, Cid))
         continue;
-      uint32_t F = plastix::GetField<plastix::FromIdTag>(Ca, Cid);
-      uint32_t T = plastix::GetField<plastix::ToIdTag>(Ca, Cid);
+      uint32_t F = plastax::GetField<plastax::FromIdTag>(Ca, Cid);
+      uint32_t T = plastax::GetField<plastax::ToIdTag>(Ca, Cid);
       // From-side kind: inputs are at level 0 and have no KindTag set;
       // tag them with a sentinel 255 ("Input") so the plotter can colour
       // them distinctly.
       uint8_t Fk = (F < NumInput)
                        ? uint8_t{255}
-                       : plastix::GetField<KindTag>(Ua, F);
-      uint8_t Tk = plastix::GetField<KindTag>(Ua, T);
+                       : plastax::GetField<KindTag>(Ua, F);
+      uint8_t Tk = plastax::GetField<KindTag>(Ua, T);
       Tf << F << ',' << T << ',' << static_cast<int>(Fk) << ','
-         << static_cast<int>(Tk) << ',' << plastix::GetWeight(Ca, Cid)
+         << static_cast<int>(Tk) << ',' << plastax::GetWeight(Ca, Cid)
          << '\n';
     }
     std::cout << "[done] wrote " << TopoPath << "\n";
