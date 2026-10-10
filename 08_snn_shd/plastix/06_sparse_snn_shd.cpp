@@ -158,8 +158,9 @@ struct EpropLoss {
   // LifBackward::Apply reads on the output level.
   using SeedField = plastax::BackwardAccTag;
   template <typename UA>
-  static float CalculateLoss(UA &U, plastax::UnitRange Out,
-                             std::span<const float> Target, auto &G) {
+  PLASTAX_HD static float CalculateLoss(UA &U, plastax::UnitRange Out,
+                                        std::span<const float> Target,
+                                        auto &G) {
     if (!G.IsFinalStep || Target.empty())
       return 0.0f;
 
@@ -285,6 +286,10 @@ struct SparseSnnTraits : plastax::DefaultNetworkTraits<EpropGlobals> {
       plastax::alloc::SOAField<FeedbackTag, float>>;
   static constexpr size_t UnitCapacity = 4096;
   static constexpr size_t ConnCapacity = 65536; // headroom for fan-in up to ~235
+  // Every phase, the loss included, is a device kernel, so on CUDA the arenas
+  // stay in device memory. The host uploads the columns its per-example reset
+  // clears and downloads the readout and hidden-spike columns it reads.
+  static constexpr bool DeviceResident = true;
 };
 static_assert(plastax::NetworkTraits<SparseSnnTraits>);
 
@@ -477,6 +482,14 @@ static void ResetPerExample(Net &N) {
   size_t NC = CA.Size();
   for (size_t C = 0; C < NC; ++C)
     plastax::GetField<EligibilityTag>(CA, C) = 0.0f;
+  bench::PushField<MembraneTag>(UA, 0, NU);
+  bench::PushField<PreActTag>(UA, 0, NU);
+  bench::PushField<LogitAccTag>(UA, 0, NU);
+  bench::PushField<LearningSignalTag>(UA, 0, NU);
+  bench::PushField<plastax::ForwardAccTag>(UA, 0, NU);
+  bench::PushField<plastax::BackwardAccTag>(UA, 0, NU);
+  bench::PushField<plastax::ActivationTag>(UA, 0, NU);
+  bench::PushField<EligibilityTag>(CA, 0, NC);
 }
 
 // --- one-hot helper -------------------------------------------------------
@@ -500,6 +513,7 @@ static int Predict(Net &N, const Dataset &D, size_t ExIdx,
   }
   // argmax over LogitAcc on the output range
   auto &UA = N.GetUnitAlloc();
+  bench::PullField<LogitAccTag>(UA, Out.Begin, Out.Size());
   size_t Best = Out.Begin;
   float BestV = plastax::GetField<LogitAccTag>(UA, Out.Begin);
   for (size_t I = Out.Begin + 1; I < Out.End; ++I) {
@@ -537,6 +551,7 @@ static double EvalAccuracy(Net &N, const Dataset &D, plastax::UnitRange Out,
         N.DoForwardPass(X);
       }
       auto &UA = N.GetUnitAlloc();
+      bench::PullField<LogitAccTag>(UA, Out.Begin, Out.Size());
       size_t Best = Out.Begin;
       float BestV = plastax::GetField<LogitAccTag>(UA, Out.Begin);
       for (size_t I = Out.Begin + 1; I < Out.End; ++I) {
@@ -574,6 +589,8 @@ static double MeanFiringRate(Net &N, const Dataset &D,
       std::span<const float> X(D.Sample(E, T), D.NChannels);
       N.DoForwardPass(X);
       auto &UA = N.GetUnitAlloc();
+      bench::PullField<plastax::ActivationTag>(UA, Hidden.Begin,
+                                               Hidden.Size());
       for (size_t I = Hidden.Begin; I < Hidden.End; ++I)
         Total += plastax::GetActivation(UA, I);
       Slots += Hidden.End - Hidden.Begin;
@@ -736,6 +753,7 @@ int main(int Argc, char **Argv) {
       ++LossCnt;
       // Argmax over LogitAcc gives the prediction without rerunning.
       auto &UA = N->GetUnitAlloc();
+      bench::PullField<LogitAccTag>(UA, OutRange.Begin, OutRange.Size());
       size_t Best = OutRange.Begin;
       float BestV = plastax::GetField<LogitAccTag>(UA, OutRange.Begin);
       for (size_t I = OutRange.Begin + 1; I < OutRange.End; ++I) {
