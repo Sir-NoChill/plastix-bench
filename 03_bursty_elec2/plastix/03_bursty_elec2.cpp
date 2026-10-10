@@ -233,12 +233,17 @@ struct BurstyTraits : plastax::DefaultNetworkTraits<> {
   // ~80 per hidden layer caps at ~200 total. Edges scale to ~10k.
   static constexpr size_t UnitCapacity = 1024;
   static constexpr size_t ConnCapacity = 65536;
-  // Burst arming lives in non-atomic statics — keep on host.
-  // BurstAddUnit decrements the per-layer add budgets in the globals, so the
-  // rules need a mutable GlobalState (host-only here anyway).
+  // BurstAddUnit decrements the per-layer add budgets in the globals (the
+  // first n_new parents of a level, in id order, spawn), so the rules take a
+  // mutable GlobalState and the add phases stay on the host. Kernelized
+  // growth would also move the new edges into per-level buckets, whose
+  // overflow retry re-runs the whole burst step. Update and prune only read
+  // the globals and run as kernels.
   static constexpr bool MutableGlobalsInRules = true;
   static constexpr bool KernelizeAdd = false;
-  static constexpr bool KernelizeUpdate = false;
+  // On CUDA the arenas stay in device memory; each host add phase pulls both
+  // arenas and pushes them back.
+  static constexpr bool DeviceResident = true;
 };
 static_assert(plastax::NetworkTraits<BurstyTraits>);
 
@@ -349,6 +354,7 @@ static double EvalLoss(Net &N, const std::vector<std::vector<float>> &X,
   size_t Cnt = 0;
   for (size_t I = Begin; I < End && I < X.size(); ++I) {
     N.DoForwardPass(X[I]);
+    N.SyncOutputToHost();
     auto Out = N.GetOutput();
     float Max = -1e30f;
     for (float V : Out)
@@ -368,6 +374,7 @@ static double EvalAcc(Net &N, const std::vector<std::vector<float>> &X,
   size_t Correct = 0, Cnt = 0;
   for (size_t I = Begin; I < End && I < X.size(); ++I) {
     N.DoForwardPass(X[I]);
+    N.SyncOutputToHost();
     auto Out = N.GetOutput();
     size_t Arg = 0;
     for (size_t J = 1; J < Out.size(); ++J)
@@ -422,6 +429,7 @@ private:
 // PruneConn policy. The host then calls N->DoPruneConnections() to fire the
 // trim deterministically as a single phase, decoupled from training steps.
 template <typename N> static size_t MagnitudePrune(N &Net, float Frac) {
+  bench::PullToHost(Net);
   auto &CA = Net.GetConnAlloc();
   std::vector<float> Alive;
   Alive.reserve(CA.Size());
@@ -438,6 +446,7 @@ template <typename N> static size_t MagnitudePrune(N &Net, float Frac) {
   Net.Global().PruneArmed = true;
   Net.DoPruneConnections();
   Net.Global().PruneArmed = false;
+  bench::PullToHost(Net);
   size_t After = bench::LiveEdgeCount(CA);
   return Before - After;
 }
@@ -511,6 +520,7 @@ int main(int Argc, char **Argv) {
       bench::OutputPaths(Args, "bursty_elec2");
   bench::StructuralLog Log(HistPath);
   bench::TestCsvWriter TestCsv("test_acc");
+  bench::PullToHost(*N);
   auto Edges = bench::LiveEdgeSet(N->GetConnAlloc());
   double InitVal = EvalLoss(*N, X, Y, PlateauStart, PlateauEnd);
   double InitTestAcc = EvalAcc(*N, X, Y, TestStart, TestEnd);
@@ -556,6 +566,7 @@ int main(int Argc, char **Argv) {
       double VL = EvalLoss(*N, X, Y, PlateauStart, PlateauEnd);
       double TestAcc = EvalAcc(*N, X, Y, TestStart, TestEnd);
       bool ShouldBurst = PD.Update(static_cast<float>(VL));
+      bench::PullToHost(*N);
       auto Ed = bench::LiveEdgeSet(N->GetConnAlloc());
       Log.Log(Step, N->GetUnitAlloc().Size(),
               bench::LiveEdgeCount(N->GetConnAlloc()), &Ed, &VL,
@@ -619,6 +630,7 @@ int main(int Argc, char **Argv) {
   S.Set("wall_seconds", Wall);
   S.Set("bursts_fired", static_cast<int>(Bursts));
   S.Set("prunes_fired", static_cast<int>(Prunes));
+  bench::PullToHost(*N);
   size_t HiddenFinal = 0;
   for (size_t U = 0; U < N->GetUnitAlloc().Size(); ++U) {
     uint16_t Lvl = plastax::GetLevel(N->GetUnitAlloc(), U);

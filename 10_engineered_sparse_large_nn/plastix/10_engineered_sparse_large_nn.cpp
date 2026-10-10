@@ -28,8 +28,9 @@
 // topology match with the other impls is secondary to it actually growing /
 // shrinking on the specified cadence (README §"Growth / shrink").
 //
-// Host build only (KernelizeUpdate / KernelizeAdd = false) — this is a CPU
-// comparison.
+// Every phase runs as a device kernel on CUDA builds, with the network
+// device-resident; the harness's direct allocator edits pull the arenas to
+// the host and push them back (on the grow cadence only).
 
 #include "plastix/common.hpp"
 
@@ -98,8 +99,9 @@ struct Forward {
 // (SeedField = void). The returned scalar is reporting only.
 struct LossPolicy {
   using SeedField = void;
-  static float CalculateLoss(auto &, plastax::UnitRange,
-                             std::span<const float> Targets, Globals &G) {
+  PLASTAX_HD static float CalculateLoss(auto &, plastax::UnitRange,
+                                        std::span<const float> Targets,
+                                        Globals &G) {
     G.Delta = Targets[0] - G.V;
     return 0.5f * G.Delta * G.Delta;
   }
@@ -121,7 +123,7 @@ struct ConnUpdate {
 };
 
 struct ResetGlobalPolicy {
-  static void Reset(auto &G) { G.Delta = 0.0f; }
+  PLASTAX_HD static void Reset(auto &G) { G.Delta = 0.0f; }
 };
 
 struct Traits : plastax::DefaultNetworkTraits<Globals> {
@@ -129,12 +131,16 @@ struct Traits : plastax::DefaultNetworkTraits<Globals> {
   using Loss = LossPolicy;
   using UpdateConn = ConnUpdate;
   using ResetGlobal = ResetGlobalPolicy;
-  // Forward writes G.V and the loss writes G.Delta: opt into mutable rule
-  // globals (the phases run on the host, Kernelize*=false).
+  // Forward writes G.V (from the single output unit) and the loss writes
+  // G.Delta (one thread): opt into mutable rule globals. The update only
+  // reads them, so every phase still runs as a device kernel.
   static constexpr bool MutableGlobalsInRules = true;
-  static constexpr bool KernelizeUpdate = false;
-  static constexpr bool KernelizeAdd = false;
   static constexpr bool ReverseAdjForward = false;
+  // On CUDA the arenas stay in device memory: each step moves the input slice
+  // in and reads G.Delta (managed) back.
+  // The harness's grow/shrink events edit the arenas on the host between
+  // steps, with a pull before and a push after.
+  static constexpr bool DeviceResident = true;
 
   using ExtraConnFields = plastax::ConnFieldList<
       plastax::alloc::SOAField<plastax::WeightTag, float>,
@@ -378,6 +384,7 @@ int main(int Argc, char **Argv) {
     // --- Growth / shrink (README §"Growth / shrink") ------------------------
     // Direct allocator manipulation on the GROW_EVERY cadence after WARMUP.
     if (T >= gs::Warmup && ((T - gs::Warmup) % gs::GrowEvery == 0)) {
+      bench::PullToHost(Network);
       // Grow GROW_UNITS hidden units (capped at MAX_UNITS).
       uint32_t MaxHiddenLayer = 0;
       for (size_t I = Topo.NIn; I < UA.Size(); ++I)
@@ -440,6 +447,7 @@ int main(int Argc, char **Argv) {
         LiveEdges[Idx] = LiveEdges.back();
         LiveEdges.pop_back();
       }
+      bench::PushToDevice(Network);
     }
     Timer.MarkPrune(); // bench only removes edges; no growth phase
     // Capture delta before ResetGlobal clears it.

@@ -17,6 +17,8 @@
 //   - bench::TopologyHash      stable hex digest of the live-edge set
 //   - bench::ReadCsv           tiny CSV reader for the cached datasets under
 //                              data/
+//   - bench::PullToHost / PushToDevice / PullField / PushField
+//                              host access to a device-resident network
 
 #include <plastax/conn.hpp>
 
@@ -34,6 +36,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -226,6 +229,49 @@ inline CsvFile ReadCsv(const std::filesystem::path &Path) {
     }
   }
   return F;
+}
+
+// ---------------------------------------------------------------------------
+// Device-resident networks (traits `DeviceResident = true`)
+// ---------------------------------------------------------------------------
+//
+// A device-resident network keeps its unit and connection arenas in device
+// memory. The allocators' host copies, which GetField and Size read on the
+// host, are stale between explicit transfers. Host code that reads or edits an
+// arena goes through these helpers. They do nothing on a managed-memory or CPU
+// build, where the host already addresses the live arena.
+
+template <typename Alloc>
+inline constexpr bool IsDeviceResident =
+    plastax::alloc::IsDeviceResidentV<std::remove_cvref_t<Alloc>>;
+
+// Refresh the host copy of both arenas, e.g. before reading the edge set.
+template <typename NetT> void PullToHost(NetT &N) {
+  if constexpr (IsDeviceResident<decltype(N.GetUnitAlloc())>) {
+    N.GetUnitAlloc().PullToHost();
+    N.GetConnAlloc().PullToHost();
+  }
+}
+
+// Upload the host copy of both arenas after host edits. Pull first: the
+// upload overwrites every column, not just the edited ones.
+template <typename NetT> void PushToDevice(NetT &N) {
+  if constexpr (IsDeviceResident<decltype(N.GetUnitAlloc())>) {
+    N.GetUnitAlloc().PushToDevice();
+    N.GetConnAlloc().PushToDevice();
+  }
+}
+
+// One column, rows [Begin, Begin + Count): the small per-step transfers.
+template <typename Tag, typename Alloc>
+void PullField(Alloc &A, size_t Begin, size_t Count) {
+  if constexpr (IsDeviceResident<Alloc>)
+    A.template PullFieldSlice<Tag>(Begin, Count);
+}
+template <typename Tag, typename Alloc>
+void PushField(Alloc &A, size_t Begin, size_t Count) {
+  if constexpr (IsDeviceResident<Alloc>)
+    A.template PushFieldSlice<Tag>(Begin, Count);
 }
 
 // ---------------------------------------------------------------------------

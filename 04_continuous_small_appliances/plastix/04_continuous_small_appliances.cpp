@@ -291,6 +291,10 @@ struct SplitTraits : plastax::DefaultNetworkTraits<> {
   static constexpr bool KernelizeUpdate = false;
   static constexpr bool KernelizeAdd = false;
   static constexpr bool KernelizePrune = false;
+  // On CUDA the arenas stay in device memory. Each host phase pulls both
+  // arenas and pushes them back; the per-step host bookkeeping moves single
+  // columns.
+  static constexpr bool DeviceResident = true;
 };
 static_assert(plastax::NetworkTraits<SplitTraits>);
 
@@ -415,6 +419,14 @@ static void ClearIsNew(Net &N) {
   auto &UA = N.GetUnitAlloc();
   for (size_t I = 0; I < UA.Size(); ++I)
     plastax::GetField<IsNewTag>(UA, I) = false;
+  bench::PushField<IsNewTag>(UA, 0, UA.Size());
+}
+
+// Live edges, read from the device copy's DeadTag column when device-resident.
+static size_t LiveEdges(Net &N) {
+  auto &CA = N.GetConnAlloc();
+  bench::PullField<plastax::DeadTag>(CA, 0, CA.Size());
+  return bench::LiveEdgeCount(CA);
 }
 
 // PyTorch's `split_unit(idx)` is function-preserving:
@@ -434,6 +446,7 @@ static void ClearIsNew(Net &N) {
 // SplitAddUnit.
 static void RepairSplitWeights(Net &N, size_t ParentId, size_t NewId,
                                std::mt19937 &Rng, float Noise) {
+  bench::PullToHost(N);
   auto &CA = N.GetConnAlloc();
   auto &UA = N.GetUnitAlloc();
   std::normal_distribution<float> Gauss(0.0f, Noise);
@@ -472,6 +485,7 @@ static void RepairSplitWeights(Net &N, size_t ParentId, size_t NewId,
         plastax::GetWeight(CA, C) = It->second;
     }
   }
+  bench::PushField<plastax::WeightTag>(CA, 0, CA.Size());
   (void)UA;
 }
 
@@ -489,6 +503,7 @@ static double EvalMse(Net &N,
   size_t Cnt = 0;
   for (size_t I = Begin; I < End && I < X.size(); ++I) {
     N.DoForwardPass(X[I]);
+    N.SyncOutputToHost();
     auto Out = N.GetOutput();
     double D = static_cast<double>(Out[0]) - static_cast<double>(Y[I]);
     Sum += D * D;
@@ -555,6 +570,7 @@ int main(int Argc, char **Argv) {
       bench::OutputPaths(Args, "continuous_small_appliances");
   bench::StructuralLog Log(HistPath);
   bench::TestCsvWriter TestCsv("test_mse");
+  bench::PullToHost(*N);
   auto Edges = bench::LiveEdgeSet(N->GetConnAlloc());
   // Carve final 15% as held-out test set; training cursor wraps inside
   // [0, NTrain). The val slice stays inside the training portion too.
@@ -597,6 +613,7 @@ int main(int Argc, char **Argv) {
     // framework hook.
     size_t HiddenWidth = 0;
     auto &UA = N->GetUnitAlloc();
+    bench::PullField<plastax::LevelTag>(UA, 0, UA.Size());
     for (size_t U = 0; U < UA.Size(); ++U)
       if (plastax::GetLevel(UA, U) == N->Global().HiddenLevel)
         ++HiddenWidth;
@@ -618,7 +635,7 @@ int main(int Argc, char **Argv) {
     float Ytgt[1] = {Y[I]};
 
     size_t UnitsBefore = N->GetUnitAlloc().Size();
-    size_t EdgesBefore = bench::LiveEdgeCount(N->GetConnAlloc());
+    size_t EdgesBefore = LiveEdges(*N);
 
     // The framework runs phases in this order:
     //   Forward → Loss → Backward → UpdateUnit → UpdateConn → PruneUnit →
@@ -655,7 +672,7 @@ int main(int Argc, char **Argv) {
     Timer.StepDone();
 
     size_t UnitsAfter = N->GetUnitAlloc().Size();
-    size_t EdgesAfter = bench::LiveEdgeCount(N->GetConnAlloc());
+    size_t EdgesAfter = LiveEdges(*N);
     int DU = static_cast<int>(UnitsAfter) - static_cast<int>(UnitsBefore);
     int DE = static_cast<int>(EdgesAfter) - static_cast<int>(EdgesBefore);
 
@@ -684,6 +701,7 @@ int main(int Argc, char **Argv) {
     if (Step % H.ValEvery == 0 || Step == H.MaxSteps || DidChange) {
       double VL = EvalMse(*N, X, Y, ValStart, ValEnd);
       double TestMse = EvalMse(*N, X, Y, TestStart, TestEnd);
+      bench::PullToHost(*N);
       auto Ed = bench::LiveEdgeSet(N->GetConnAlloc());
       Log.Log(Step, N->GetUnitAlloc().Size(),
               bench::LiveEdgeCount(N->GetConnAlloc()), &Ed, &VL,
@@ -714,6 +732,7 @@ int main(int Argc, char **Argv) {
   S.Set("wall_seconds", Wall);
   S.Set("splits_fired", static_cast<int>(Splits));
   S.Set("prunes_fired", static_cast<int>(Prunes));
+  bench::PullToHost(*N);
   size_t HiddenFinal = 0;
   for (size_t U = 0; U < N->GetUnitAlloc().Size(); ++U)
     if (plastax::GetLevel(N->GetUnitAlloc(), U) == N->Global().HiddenLevel)

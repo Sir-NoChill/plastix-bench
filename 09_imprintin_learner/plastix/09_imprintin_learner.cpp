@@ -170,9 +170,9 @@ struct ImprintingLearnerForward {
 // no gradient seed (SeedField = void). The returned scalar is reporting only.
 struct ImprintingLearnerLoss {
   using SeedField = void;
-  static float CalculateLoss(auto &, plastax::UnitRange,
-                             std::span<const float> Targets,
-                             ImprintingLearnerGlobals &G) {
+  PLASTAX_HD static float CalculateLoss(auto &, plastax::UnitRange,
+                                        std::span<const float> Targets,
+                                        ImprintingLearnerGlobals &G) {
     float Reward = Targets[0];
     G.Delta = Reward + hp::Gamma * G.V - G.VOld;
     G.VDeltaPrev = G.VDelta;
@@ -375,7 +375,7 @@ struct ImprintingLearnerAddConn {
 };
 
 struct ImprintingLearnerResetGlobal {
-  static void Reset(auto &G) {
+  PLASTAX_HD static void Reset(auto &G) {
     G.VOld = G.V;
     G.GenerationLeft = hp::MaxGenerationsPerStep;
     G.WasActive = false;
@@ -393,12 +393,22 @@ struct ImprintingLearnerTraits
   using AddUnit = ImprintingLearnerAddUnit;
   using AddConn = ImprintingLearnerAddConn;
   static constexpr bool KernelizeUpdate = true;  // forward+update on-device
-  static constexpr bool KernelizeAdd = false;    // structural host (early-out)
+  // The growth rules stay on the host. They draw from the sequential
+  // std::mt19937 in the globals (unit kind, threshold, delay, the memory
+  // unit's 0.2 coin), and the predicate sets the per-unit InputsAdded /
+  // OutputsAdded flags as it goes, so its result depends on the sweep order.
+  // A kernel would need the keyed Rng and an order-free predicate: a
+  // different random stream and a different growth rule.
+  static constexpr bool KernelizeAdd = false;
   // The forward, loss, update and add rules write the globals (G.V, G.Tau,
   // G.B, G.VDelta, G.GenerationLeft, G.Rng, ...), so opt into mutable rule
   // globals; the stateful growth predicate stays a bare legacy predicate on
   // the host pair sweep (MaxLevelGap defaults to 1, the old Neighbourhood).
   static constexpr bool MutableGlobalsInRules = true;
+  // On CUDA the arenas live in device memory. The forward, loss, update and
+  // reset run as kernels; each host add phase pulls both arenas, runs, and
+  // pushes them back (the framework's host-phase path).
+  static constexpr bool DeviceResident = true;
   // Per-unit reduction forward over the reverse-adjacency CSR — avoids the
   // per-edge atomicAdd contention when the output unit has ~N incoming edges.
   static constexpr bool ReverseAdjForward = false;
@@ -541,6 +551,8 @@ int main(int Argc, char **Argv) {
                                    WritePos.data());
     for (size_t I = 0; I < NU; ++I)
       plastax::GetField<InDegreeTag>(UA, I) = Offsets[I + 1] - Offsets[I];
+    // The constructor already uploaded the arenas.
+    bench::PushField<InDegreeTag>(UA, 0, NU);
   }
   MP.EndWeights();
 
@@ -617,6 +629,7 @@ int main(int Argc, char **Argv) {
     Timer.MarkReset();
     Timer.StepDone();
 
+    Net.SyncOutputToHost();
     float V = Net.GetOutput()[0];
     Predictions[T] = V;
 
@@ -628,6 +641,7 @@ int main(int Argc, char **Argv) {
     if (WindowCnt >= H.LogEvery || T + 1 == N) {
       double WindowMse = WindowCnt > 0 ? WindowSse / WindowCnt : 0.0;
       ++EpochIdx;
+      bench::PullToHost(Net);
       auto Ed = bench::LiveEdgeSet(Net.GetConnAlloc());
       Log.Log(EpochIdx, Net.GetUnitAlloc().Size(),
               bench::LiveEdgeCount(Net.GetConnAlloc()), &Ed, &WindowMse,

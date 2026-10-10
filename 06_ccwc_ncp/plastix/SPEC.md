@@ -88,8 +88,8 @@ Beyond the framework core (`ActivationTag`, `ForwardAccTag`,
 | `LastDenomTag`     | float | Saved denom `(1 + Δt(1/τ + Σf_ij))` of the LTC step; needed by eligibility |
 | `LastFsumTag`      | float | Saved `Σ f_ij` (used only for diagnostics; could be folded into LastDenom) |
 
-Forward's `Accumulator` is a 2-field struct `{ Num, Denom }`, with `Combine`
-adding component-wise. `ForwardAccTag` on the unit carries this struct.
+Forward's `Accumulator` is a float (the synaptic drive), with `Combine`
+adding. `ForwardAccTag` on the unit carries it.
 
 ## Per-connection fields
 
@@ -134,7 +134,7 @@ out of the step entirely.
 The benchmark was originally drafted with the full LTC semi-implicit
 Euler step (`x_new = (x + Δt·num) / (1 + Δt·(1/τ + denom))` with
 sigmoid synapses and signed `w_ij` numerator vs. `|w_ij|` denominator).
-That formulation is *implementable* in Plastix — it exercises a 2-field
+That formulation is *implementable* in Plastix — it needs a 2-field
 `Accumulator` struct — but the `|w_ij|·f_ij` denominator dominates when
 weights are small and collapses every hidden unit to ≈0, leaving the
 network stuck at the constant-zero predictor (test MSE ≈ 0.5 on
@@ -144,24 +144,25 @@ The shipped version uses the discrete LTC-lite update Hasani 2021
 reduces to in their appendix — a leaky tanh RNN where α plays τ's role:
 
 ```cpp
-struct LtcAcc { float Drive = 0.0f; };  // single-field struct kept so
-                                        //   the framework's struct-Accumulator
-                                        //   path still gets exercised
 struct LtcForward {
-  using Accumulator = LtcAcc;
+  // A float sum, so the pass runs as a device kernel and the network stays
+  // device-resident on CUDA. (It was a one-field struct, kept to exercise the
+  // struct-Accumulator path; that path has no device kernel.)
+  using Accumulator = float;
+  static constexpr bool CombineIsSum = true;
 
   // Synaptic drive: w_ij · tanh(x_src). Signed, bounded, well-conditioned.
-  static LtcAcc Map(auto &U, size_t, size_t Src, auto &C, size_t Cid, auto &) {
-    return { GetWeight(C, Cid) * std::tanh(GetActivation(U, Src)) };
+  static float Map(auto &U, size_t, size_t Src, auto &C, size_t Cid, auto &) {
+    return GetWeight(C, Cid) * std::tanh(GetActivation(U, Src));
   }
-  static LtcAcc Combine(LtcAcc A, LtcAcc B) { return { A.Drive + B.Drive }; }
+  static float Combine(float A, float B) { return A + B; }
 
   // x_new = tanh(α·x_prev + Σ w_ij·tanh(x_src)),  α = exp(-Δt/τ).
-  static void Apply(auto &U, size_t Id, auto &, LtcAcc Acc) {
+  static void Apply(auto &U, size_t Id, auto &, float Drive) {
     float Tau   = GetField<TauTag>(U, Id);
     float Alpha = std::exp(-Hyper::Dt / Tau);
     float Xprev = GetActivation(U, Id);
-    float Pre   = Alpha * Xprev + Acc.Drive;
+    float Pre   = Alpha * Xprev + Drive;
     GetActivation(U, Id) = std::tanh(Pre);
     GetField<LastDenomTag>(U, Id) = Alpha;       // saved for e-prop
   }
@@ -355,9 +356,6 @@ psMNIST extension lands.)
 
 ## What this benchmark exercises that the existing suite does not
 
-- A `ForwardPass::Accumulator` that is a **multi-field struct** with a
-  user-defined `Combine`. The other Plastix benchmarks all use scalar
-  float accumulators.
 - **Pipeline propagation with recurrent edges.** `pipeline-fcc`
   demonstrates Pipeline mode on a strict DAG; this benchmark is the
   first that exercises Pipeline's actual point — handling cycles
