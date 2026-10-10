@@ -107,6 +107,9 @@ struct Hyper {
 // ---------------------------------------------------------------------------
 
 struct LtcForward {
+  // A struct accumulator cannot run as a device kernel (that needs a float
+  // accumulator plus CombineIsSum), so this forward takes the host path on
+  // a managed-memory CUDA build.
   using Accumulator = LtcAcc;
 
   // Synaptic drive into the destination unit. The synapse activation is
@@ -145,6 +148,7 @@ struct LtcForward {
 
 struct LtcBackward {
   using Accumulator = float;
+  static constexpr bool CombineIsSum = true;
 
   // Project the downstream learning signal back through the connection
   // weight, *including* the destination's tanh sensitivity φ'(z_Dst) =

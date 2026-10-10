@@ -136,6 +136,7 @@ struct ImprintingLearnerForward {
   // field (via the reverse-adjacency), so the pattern threshold (avg = Σ/n)
   // still works on-device.
   using Accumulator = float;
+  static constexpr bool CombineIsSum = true;
   PLASTAX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
                               size_t ConnId, auto &) {
     return plastax::GetWeight(C, ConnId) * plastax::GetActivation(U, SrcId);
