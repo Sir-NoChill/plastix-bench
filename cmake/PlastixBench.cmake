@@ -65,9 +65,9 @@ endfunction()
 # ----------------------------------------------------------------------------
 # Helper: compile a plastix/ bench target through nvcc.
 #
-# Mirrors Plastix's own plastix_enable_cuda_on_target. When the suite is built
+# Mirrors plastax-cpp's own plastax_enable_cuda_on_target. When the suite is built
 # with PLASTIX_BENCH_ENABLE_CUDA=ON the plastix/ TUs pull in CUB device code +
-# <<<>>> through the Plastix headers (guarded there by PLASTIX_HAS_CUDA), so
+# <<<>>> through the Plastix headers (guarded there by PLASTAX_HAS_CUDA), so
 # their .cpp sources must be handed to nvcc. A no-op when CUDA is off, so the
 # host build never touches the CUDA toolchain.
 # ----------------------------------------------------------------------------

@@ -67,10 +67,14 @@ struct Forward {
   }
 };
 
+// The error lives in the globals, not in a unit field: no gradient seed
+// (SeedField = void). The returned scalar is reporting only.
 struct LossPolicy {
-  static void CalculateLoss(auto &, plastax::UnitRange,
-                            std::span<const float> Targets, Globals &G) {
+  using SeedField = void;
+  static float CalculateLoss(auto &, plastax::UnitRange,
+                             std::span<const float> Targets, Globals &G) {
     G.Delta = Targets[0] - G.V;
+    return 0.5f * G.Delta * G.Delta;
   }
 };
 
@@ -97,6 +101,9 @@ struct Traits : plastax::DefaultNetworkTraits<Globals> {
   using Loss = LossPolicy;
   using UpdateConn = ConnUpdate;
   using ResetGlobal = ResetGlobalPolicy;
+  // Forward writes G.V and the loss writes G.Delta: opt into mutable rule
+  // globals (the phases run on the host, Kernelize*=false).
+  static constexpr bool MutableGlobalsInRules = true;
   static constexpr bool KernelizeUpdate = false;
   static constexpr bool KernelizeAdd = false;
   static constexpr bool ReverseAdjForward = false;

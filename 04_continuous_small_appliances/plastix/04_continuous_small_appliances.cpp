@@ -227,10 +227,11 @@ struct SplitAddUnit {
 
 // SplitAddConn — wires the freshly-allocated unit to every input (level 0)
 // and to every output (level >= HiddenLevel+1). The framework's
-// neighbourhood sweep iterates pairs by level distance, so Neighbourhood=1
+// neighbourhood sweep iterates pairs by level distance, so MaxLevelGap=1
 // reaches input -> hidden and hidden -> output. Uses the same per-step
 // IsNewTag pattern as workload 03.
 struct SplitAddConn {
+  static constexpr uint16_t MaxLevelGap = 1;
   PLASTAX_HD static bool ShouldAddIncomingConnection(auto &UA, size_t SelfId,
                                                      size_t CandidateId,
                                                      auto &) {
@@ -275,13 +276,16 @@ struct SplitTraits : plastax::DefaultNetworkTraits<> {
       plastax::alloc::SOAField<IsNewTag, bool>,
       plastax::alloc::SOAField<ActVarTag, float>,
       plastax::alloc::SOAField<LiveInDegreeTag, uint32_t>>;
-  static constexpr uint16_t Neighbourhood = 1;
   // PyTorch defaults: 27 input features (UCI Appliances), max_hidden=256,
   // 1 output. Initial edges ~ 27*32 + 32 = 896. Peak after splits to
   // max_hidden=256: 27*256 + 256 = 7168 edges. We size the conn alloc
   // bigger to cover the prune-add churn slack.
   static constexpr size_t UnitCapacity = 1024;
   static constexpr size_t ConnCapacity = 65536;
+  // UpdateUnit / UpdateConn / SplitAddUnit write the argmax/argmin scratch
+  // and the single-shot arming flag in the globals; the phases stay on the
+  // host (Kernelize*=false) so those sequential reductions are well-defined.
+  static constexpr bool MutableGlobalsInRules = true;
   static constexpr bool KernelizeUpdate = false;
   static constexpr bool KernelizeAdd = false;
   static constexpr bool KernelizePrune = false;

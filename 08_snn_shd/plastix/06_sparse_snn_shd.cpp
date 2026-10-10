@@ -99,7 +99,6 @@ struct EpropGlobals {
   float BetaTrace = 0.9f;
   float SurrogateSlope = 25.0f;
   float LogitScale = 1.0f; // 1/n_bins so summed readout membrane stays O(1)
-  float Loss = 0.0f;       // reporting only; reset each call to Loss policy
 };
 
 // --- forward: LIF integration ----------------------------------------------
@@ -154,11 +153,14 @@ struct LifForward {
 // --- loss: softmax CE on accumulated readout membrane ----------------------
 
 struct EpropLoss {
+  // The dL/dlogit seed goes to the output units' backward accumulator, which
+  // LifBackward::Apply reads on the output level.
+  using SeedField = plastax::BackwardAccTag;
   template <typename UA>
-  static void CalculateLoss(UA &U, plastax::UnitRange Out,
-                            std::span<const float> Target, auto &G) {
+  static float CalculateLoss(UA &U, plastax::UnitRange Out,
+                             std::span<const float> Target, auto &G) {
     if (!G.IsFinalStep || Target.empty())
-      return;
+      return 0.0f;
 
     // LogitAcc is already the per-timestep mean of mem_o (Forward Apply
     // applied the LogitScale factor), so the softmax is in the right
@@ -179,11 +181,11 @@ struct EpropLoss {
           std::exp(plastax::GetField<LogitAccTag>(U, I) - MaxL) / Z);
       float Y = Target[K];
       // dL/dlogit = softmax - one_hot, staged for backward.
-      plastax::GetBackwardAcc(U, I) = P - Y;
+      plastax::GetField<SeedField>(U, I) = P - Y;
       if (Y > 0.0f)
         Loss += -std::log(std::max(P, 1e-30f));
     }
-    G.Loss = Loss;
+    return Loss; // read back through Net::GetLastLoss()
   }
 };
 
@@ -727,7 +729,8 @@ int main(int Argc, char **Argv) {
         Timer.MarkReset();
         Timer.StepDone();
       }
-      LossSum += G.Loss;
+      // The final timestep's DoCalculateLoss set the network's last loss.
+      LossSum += N->GetLastLoss();
       ++LossCnt;
       // Argmax over LogitAcc gives the prediction without rerunning.
       auto &UA = N->GetUnitAlloc();

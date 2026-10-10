@@ -409,7 +409,7 @@ static void ResetPerSequence(Net &N, size_t NumInput) {
     plastax::GetField<LastDenomTag>(Ua, Id) = 1.0f;
     plastax::GetField<LastFsumTag>(Ua, Id) = 0.0f;
     plastax::GetForwardAcc(Ua, Id) = LtcAcc{};
-    plastax::GetBackwardAcc(Ua, Id) = 0.0f;
+    plastax::GetField<plastax::BackwardAccTag>(Ua, Id) = 0.0f;
   }
   size_t Nc = Ca.Size();
   for (size_t Cid = 0; Cid < Nc; ++Cid) {

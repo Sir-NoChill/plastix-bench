@@ -182,6 +182,8 @@ struct BurstAddUnit {
 // endpoint carries IsNewTag. New units therefore gain edges to/from every
 // neighbour on both sides in a single burst step.
 struct BurstAddConn {
+  // Candidates come from adjacent levels only (was Traits::Neighbourhood).
+  static constexpr uint16_t MaxLevelGap = 1;
   PLASTAX_HD static bool ShouldAddIncomingConnection(auto &UA, size_t SelfId,
                                                      size_t CandidateId,
                                                      auto &G) {
@@ -224,13 +226,15 @@ struct BurstyTraits : plastax::DefaultNetworkTraits<> {
       plastax::alloc::SOAField<GradPreActTag, float>,
       plastax::alloc::SOAField<IsOutputTag, bool>,
       plastax::alloc::SOAField<IsNewTag, bool>>;
-  static constexpr uint16_t Neighbourhood = 1;
   // Headroom for a two-hidden-layer net that grows by ~15% per burst over
   // 30 bursts. Initial: 6 input + 32 + 32 + 2 = 72 units, plus growth to
   // ~80 per hidden layer caps at ~200 total. Edges scale to ~10k.
   static constexpr size_t UnitCapacity = 1024;
   static constexpr size_t ConnCapacity = 65536;
   // Burst arming lives in non-atomic statics — keep on host.
+  // BurstAddUnit decrements the per-layer add budgets in the globals, so the
+  // rules need a mutable GlobalState (host-only here anyway).
+  static constexpr bool MutableGlobalsInRules = true;
   static constexpr bool KernelizeAdd = false;
   static constexpr bool KernelizeUpdate = false;
 };

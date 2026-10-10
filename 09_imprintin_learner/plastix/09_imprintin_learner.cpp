@@ -165,15 +165,19 @@ struct ImprintingLearnerForward {
   }
 };
 
+// The TD error lives in the globals, not in a unit field, so the loss writes
+// no gradient seed (SeedField = void). The returned scalar is reporting only.
 struct ImprintingLearnerLoss {
-  static void CalculateLoss(auto &, plastax::UnitRange,
-                            std::span<const float> Targets,
-                            ImprintingLearnerGlobals &G) {
+  using SeedField = void;
+  static float CalculateLoss(auto &, plastax::UnitRange,
+                             std::span<const float> Targets,
+                             ImprintingLearnerGlobals &G) {
     float Reward = Targets[0];
     G.Delta = Reward + hp::Gamma * G.V - G.VOld;
     G.VDeltaPrev = G.VDelta;
     G.VDelta = 0.0f;
     G.B = 0.0f;
+    return 0.5f * G.Delta * G.Delta;
   }
 };
 
@@ -389,6 +393,11 @@ struct ImprintingLearnerTraits
   using AddConn = ImprintingLearnerAddConn;
   static constexpr bool KernelizeUpdate = true;  // forward+update on-device
   static constexpr bool KernelizeAdd = false;    // structural host (early-out)
+  // The forward, loss, update and add rules write the globals (G.V, G.Tau,
+  // G.B, G.VDelta, G.GenerationLeft, G.Rng, ...), so opt into mutable rule
+  // globals; the stateful growth predicate stays a bare legacy predicate on
+  // the host pair sweep (MaxLevelGap defaults to 1, the old Neighbourhood).
+  static constexpr bool MutableGlobalsInRules = true;
   // Per-unit reduction forward over the reverse-adjacency CSR — avoids the
   // per-edge atomicAdd contention when the output unit has ~N incoming edges.
   static constexpr bool ReverseAdjForward = false;

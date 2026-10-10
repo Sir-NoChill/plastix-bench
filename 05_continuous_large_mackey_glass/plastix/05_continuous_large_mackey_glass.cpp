@@ -194,6 +194,7 @@ struct MgAddUnit {
 //   - When RewireAddEnabled is true, also propose a small number of new
 //     random input -> hidden edges to compensate for the rewire's prune.
 struct MgAddConn {
+  static constexpr uint16_t MaxLevelGap = 1;
   PLASTAX_HD static bool ShouldAddIncomingConnection(auto &UA, size_t SelfId,
                                                      size_t CandidateId,
                                                      auto &G) {
@@ -243,7 +244,10 @@ struct MgTraits : plastax::DefaultNetworkTraits<> {
       plastax::alloc::SOAField<GradPreActTag, float>,
       plastax::alloc::SOAField<IsOutputTag, bool>,
       plastax::alloc::SOAField<IsNewTag, bool>>;
-  static constexpr uint16_t Neighbourhood = 1;
+  // PruneUnit / PruneConn / MgAddUnit decrement their budgets in the
+  // globals; the phases stay on the host (Kernelize*=false) so the
+  // decrements are sequential and well-defined.
+  static constexpr bool MutableGlobalsInRules = true;
   static constexpr bool KernelizeUpdate = false;
   static constexpr bool KernelizeAdd = false;
   static constexpr bool KernelizePrune = false;
