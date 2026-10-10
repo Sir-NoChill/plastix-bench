@@ -105,6 +105,7 @@ struct EpropGlobals {
 
 struct LifForward {
   using Accumulator = float;
+  static constexpr bool CombineIsSum = true;
 
   PLASTAX_HD static float Map(auto &U, size_t /*Self*/, size_t SrcId,
                               auto &C, size_t ConnId, auto &) {
@@ -193,6 +194,7 @@ struct EpropLoss {
 
 struct LifBackward {
   using Accumulator = float;
+  static constexpr bool CombineIsSum = true;
 
   PLASTAX_HD static float Map(auto &U, size_t /*Src*/, size_t ToId, auto &C,
                               size_t ConnId, auto &) {

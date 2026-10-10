@@ -64,6 +64,7 @@ struct IsOutputTag {};
 
 struct Forward {
   using Accumulator = float;
+  static constexpr bool CombineIsSum = true;
   PLASTAX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
                               size_t ConnId, auto &) {
     return plastax::GetWeight(C, ConnId) * plastax::GetActivation(U, SrcId);
@@ -79,6 +80,7 @@ struct Forward {
 
 struct Backward {
   using Accumulator = float;
+  static constexpr bool CombineIsSum = true;
   PLASTAX_HD static float Map(auto &U, size_t, size_t ToId, auto &C,
                               size_t ConnId, auto &) {
     return plastax::GetWeight(C, ConnId) *

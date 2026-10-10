@@ -103,6 +103,7 @@ void NormalizeInPlace(std::vector<float> &S) {
 // WeightTag (the connection's reservoir weight) is in the default ExtraConnFields.
 struct Forward {
   using Accumulator = float;
+  static constexpr bool CombineIsSum = true;
   // Pipeline forward: Self=dest, Other=src. Sum over edges of w·x_src(t-1).
   PLASTAX_HD static float Map(auto &U, size_t, size_t SrcId, auto &C,
                               size_t ConnId, auto &) {
