@@ -7,9 +7,8 @@
 //
 // Plastix policy mapping (see SPEC.md in this directory for the full story):
 //
-//   ForwardPass   custom    LTC semi-implicit Euler step; Accumulator is the
-//                           2-field struct { Num, Denom } so one Map / Combine
-//                           pass carries both reductions.
+//   ForwardPass   custom    leaky-tanh step (LTC-lite); float Accumulator
+//                           carrying the synaptic drive.
 //   Loss          MSELoss   built-in; motor activations vs target each step
 //                           (sine task is sequence-to-sequence regression).
 //   BackwardPass  custom    one Pipeline backward sweep produces the per-unit
@@ -63,23 +62,6 @@ enum class Kind : uint8_t {
   Motor   = 3,
 };
 
-// Forward accumulator. We started with the LTC semi-implicit Euler
-// formulation (numerator + denominator reductions), but the |w|·f
-// denominator collapses every unit toward zero under sparse small weights
-// — the network never escapes the constant-zero predictor (MSE ≈ 0.5 on
-// unit-amplitude sin/cos). A scalar accumulator on top of a
-// leaky-tanh RNN (the discrete LTC-lite the LTC paper itself reduces to
-// in its appendix) recovers the right gradient flow without sacrificing
-// the continuous-time interpretation — α plays τ's role and the synaptic
-// drive Σ w_ij · tanh(x_src) plays Σ S_ij · (A_ij − x_i).
-//
-// Keeping the struct around (even with just one field) means the
-// framework's Accumulator-as-struct path is still exercised — that was
-// part of the point of this benchmark, see SPEC.md.
-struct LtcAcc {
-  float Drive = 0.0f;
-};
-
 // ---------------------------------------------------------------------------
 // Hyperparameters — kept as static members so the CLI can rewrite them once
 // at startup, then the policy structs read them in their lambdas. The same
@@ -106,43 +88,51 @@ struct Hyper {
 // Policies
 // ---------------------------------------------------------------------------
 
+// Forward. We started with the LTC semi-implicit Euler formulation
+// (numerator + denominator reductions), but the |w|·f denominator collapses
+// every unit toward zero under sparse small weights — the network never
+// escapes the constant-zero predictor (MSE ≈ 0.5 on unit-amplitude sin/cos).
+// A scalar accumulator on top of a leaky-tanh RNN (the discrete LTC-lite the
+// LTC paper itself reduces to in its appendix) recovers the right gradient
+// flow without sacrificing the continuous-time interpretation — α plays τ's
+// role and the synaptic drive Σ w_ij · tanh(x_src) plays Σ S_ij · (A_ij − x_i).
+//
+// The drive is a plain float sum, so the pass runs as a device kernel and the
+// network can stay device-resident. It used to be a one-field struct, kept to
+// exercise the struct-Accumulator path, which only runs on the host.
 struct LtcForward {
-  // A struct accumulator cannot run as a device kernel (that needs a float
-  // accumulator plus CombineIsSum), so this forward takes the host path on
-  // a managed-memory CUDA build.
-  using Accumulator = LtcAcc;
+  using Accumulator = float;
+  static constexpr bool CombineIsSum = true;
 
   // Synaptic drive into the destination unit. The synapse activation is
   // tanh(γ·(x_src − μ)) — bounded and signed, so a positive w can either
   // excite or inhibit depending on the source's sign. Wired here as
   // tanh(x_src) (γ=1, μ=0) to keep the gradient computation symmetric
   // and well-conditioned.
-  PLASTAX_HD static LtcAcc Map(auto &U, size_t /*Dst*/, size_t Src,
-                               auto &C, size_t Cid, auto &) {
+  PLASTAX_HD static float Map(auto &U, size_t /*Dst*/, size_t Src, auto &C,
+                              size_t Cid, auto &) {
     float Xs = plastax::GetActivation(U, Src);
     float W  = plastax::GetWeight(C, Cid);
-    return LtcAcc{W * std::tanh(Xs)};
+    return W * std::tanh(Xs);
   }
 
-  PLASTAX_HD static LtcAcc Combine(LtcAcc A, LtcAcc B) {
-    return LtcAcc{A.Drive + B.Drive};
-  }
+  PLASTAX_HD static float Combine(float A, float B) { return A + B; }
 
   // x_new = tanh(α · x_prev + Σ w_ij · tanh(x_src_prev)), α ∈ (0, 1)
   // derived from τ as α = exp(−Δt / τ). The sine-task targets sit in
   // [−1, 1] (sin/cos), so a tanh-saturated readout is in the right
   // range. A linear motor unit would let the recurrent motor→command
   // feedback drive unbounded activations within a few steps.
-  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &G, LtcAcc Acc) {
+  PLASTAX_HD static void Apply(auto &U, size_t Id, auto &G, float Drive) {
     float Tau = plastax::GetField<TauTag>(U, Id);
     if (Tau <= 0.0f) Tau = 1.0f;
     float Alpha = std::exp(-G.Dt / Tau);
     float Xprev = plastax::GetActivation(U, Id);
-    float Pre   = Alpha * Xprev + Acc.Drive;
+    float Pre   = Alpha * Xprev + Drive;
     float Xnew  = std::tanh(Pre);
     plastax::GetActivation(U, Id)         = Xnew;
     plastax::GetField<LastDenomTag>(U, Id) = Alpha;        // saved for e-prop
-    plastax::GetField<LastFsumTag>(U, Id)  = Acc.Drive;    // diagnostic
+    plastax::GetField<LastFsumTag>(U, Id)  = Drive;        // diagnostic
   }
 };
 
@@ -248,6 +238,9 @@ struct CcwcTraits : plastax::DefaultNetworkTraits<> {
   // a 64-unit sweep; bump if you push --units higher.
   static constexpr size_t UnitCapacity = 256;
   static constexpr size_t ConnCapacity = 4096;
+  // Every phase is a device kernel, so on CUDA the arenas stay in device
+  // memory; the per-sequence reset uploads only the columns it clears.
+  static constexpr bool DeviceResident = true;
 };
 static_assert(plastax::NetworkTraits<CcwcTraits>);
 
@@ -400,7 +393,8 @@ struct NCPWiringBuilder {
 
 // ---------------------------------------------------------------------------
 // Per-sequence reset — zero recurrent state, eligibility, learning signal.
-// O(units + conns). Called between training sequences.
+// O(units + conns). Called between training sequences. The host writes every
+// row of the columns it clears, so only those columns are uploaded.
 // ---------------------------------------------------------------------------
 
 static void ResetPerSequence(Net &N, size_t NumInput) {
@@ -412,7 +406,7 @@ static void ResetPerSequence(Net &N, size_t NumInput) {
     plastax::GetField<LearningSignalTag>(Ua, Id) = 0.0f;
     plastax::GetField<LastDenomTag>(Ua, Id) = 1.0f;
     plastax::GetField<LastFsumTag>(Ua, Id) = 0.0f;
-    plastax::GetForwardAcc(Ua, Id) = LtcAcc{};
+    plastax::GetForwardAcc(Ua, Id) = 0.0f;
     plastax::GetField<plastax::BackwardAccTag>(Ua, Id) = 0.0f;
   }
   size_t Nc = Ca.Size();
@@ -421,6 +415,15 @@ static void ResetPerSequence(Net &N, size_t NumInput) {
       continue;
     plastax::GetField<EligibilityTag>(Ca, Cid) = 0.0f;
   }
+  size_t Nh = Nu - NumInput;
+  bench::PushField<plastax::ActivationTag>(Ua, NumInput, Nh);
+  bench::PushField<LearningSignalTag>(Ua, NumInput, Nh);
+  bench::PushField<LastDenomTag>(Ua, NumInput, Nh);
+  bench::PushField<LastFsumTag>(Ua, NumInput, Nh);
+  bench::PushField<plastax::ForwardAccTag>(Ua, NumInput, Nh);
+  bench::PushField<plastax::BackwardAccTag>(Ua, NumInput, Nh);
+  // The topology is fixed, so no slot is dead and every row was written.
+  bench::PushField<EligibilityTag>(Ca, 0, Nc);
 }
 
 // ---------------------------------------------------------------------------
@@ -481,6 +484,7 @@ static double EvalMse(Net &N, const SineDataset &D, size_t NumInput) {
       TgtBuf = Yseq[T];
       N.DoStep(std::span<const float>(InBuf.data(), 2),
                std::span<const float>(TgtBuf.data(), 2));
+      N.SyncOutputToHost();
       auto Out = N.GetOutput();
       // MSE = mean (pred - target)^2 per output dim.
       float D0 = Out[0] - TgtBuf[0];
@@ -597,6 +601,7 @@ int main(int Argc, char **Argv) {
   double InitVal  = EvalMse(*N, Val, NumInput);
   double InitTest = EvalMse(*N, Test, NumInput);
   N->Global().Lr = SavedLrInit;
+  bench::PullToHost(*N);
   auto Edges0 = bench::LiveEdgeSet(N->GetConnAlloc());
   Log.Log(0, NumUnits, NumEdges, &Edges0, &InitVal,
           {{"epoch", 0.0},
@@ -643,6 +648,7 @@ int main(int Argc, char **Argv) {
         N->DoResetGlobalState();
         Timer.MarkReset();
         Timer.StepDone();
+        N->SyncOutputToHost();
         auto Out = N->GetOutput();
         float D0 = Out[0] - TgtBuf[0];
         float D1 = Out[1] - TgtBuf[1];
@@ -661,6 +667,7 @@ int main(int Argc, char **Argv) {
     double TestMse = EvalMse(*N, Test, NumInput);
     N->Global().Lr = SavedLr;
 
+    bench::PullToHost(*N);
     auto Edges = bench::LiveEdgeSet(N->GetConnAlloc());
     Log.Log(Ep, NumUnits, NumEdges, &Edges, &ValMse,
             {{"epoch", static_cast<double>(Ep)},
@@ -705,6 +712,7 @@ int main(int Argc, char **Argv) {
       TgtBuf = Yseq[T];
       N->DoStep(std::span<const float>(InBuf.data(), 2),
                 std::span<const float>(TgtBuf.data(), 2));
+      N->SyncOutputToHost();
       auto Out = N->GetOutput();
       Pf << T << ',' << TgtBuf[0] << ',' << TgtBuf[1] << ',' << Out[0]
          << ',' << Out[1] << ',' << InBuf[0] << ',' << InBuf[1] << '\n';
@@ -724,6 +732,7 @@ int main(int Argc, char **Argv) {
        << " n_sensory=" << Part.Ns << " n_inter=" << Part.Ni
        << " n_command=" << Part.Nc << " n_motor=" << Part.Nm << '\n';
     Tf << "from_id,to_id,from_kind,to_kind,weight\n";
+    bench::PullToHost(*N);
     auto &Ca = N->GetConnAlloc();
     auto &Ua = N->GetUnitAlloc();
     for (size_t Cid = 0; Cid < Ca.Size(); ++Cid) {
