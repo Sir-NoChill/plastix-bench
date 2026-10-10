@@ -121,6 +121,7 @@ struct MgGlobals {
   uint64_t AddConnSeed = 0;      // MgAddConn
   bool RewireAddEnabled = false; // MgAddConn
   float RewireDensity = 0.0f;    // MgAddConn
+  uint32_t NumInput = 0;         // MgAddConn: ids [0, NumInput) are inputs
 };
 
 struct UpdateConn {
@@ -201,12 +202,18 @@ struct MgAddConn {
     bool SelfNew = plastax::GetField<IsNewTag>(UA, SelfId);
     bool SelfOut = plastax::GetField<IsOutputTag>(UA, SelfId);
     bool CandNew = plastax::GetField<IsNewTag>(UA, CandidateId);
-    if (SelfNew && plastax::GetLevel(UA, CandidateId) <
-                       plastax::GetLevel(UA, SelfId))
+    // The input-side wiring takes true inputs only. A hidden unit whose
+    // incoming edges were all rewired away recomputes to level 0, and
+    // admitting it as an "input" grew hidden <-> hidden 2-cycles, which the
+    // topological level schedule cannot represent (plastax-cpp now rejects
+    // them at the resort; the old library silently flattened them).
+    bool CandInput = CandidateId < G.NumInput;
+    if (SelfNew && CandInput &&
+        plastax::GetLevel(UA, CandidateId) < plastax::GetLevel(UA, SelfId))
       return true;
     if (SelfOut && CandNew)
       return true;
-    if (G.RewireAddEnabled &&
+    if (G.RewireAddEnabled && CandInput &&
         plastax::GetLevel(UA, CandidateId) <
             plastax::GetLevel(UA, SelfId) &&
         plastax::GetLevel(UA, SelfId) == G.HiddenLevel) {
@@ -436,6 +443,7 @@ int main(int Argc, char **Argv) {
   N->Global().AddConnSeed = static_cast<uint64_t>(Args.Seed) * 1000ull + 29ull;
   N->Global().RewireSeed = N->Global().AddConnSeed ^ 0xC0FFEEull;
   N->Global().RewireDensity = H.RewireFrac;
+  N->Global().NumInput = static_cast<uint32_t>(H.InLen);
 
   std::mt19937 Rng(static_cast<uint32_t>(Args.Seed));
   std::uniform_real_distribution<float> Coin(0.0f, 1.0f);
