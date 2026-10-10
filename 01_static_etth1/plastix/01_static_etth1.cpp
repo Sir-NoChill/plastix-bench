@@ -137,6 +137,9 @@ struct StaticTraits : plastax::DefaultNetworkTraits<> {
   // peaks at 1352 units and ~280k connections. Headroom on top of that.
   static constexpr size_t UnitCapacity = 4096;
   static constexpr size_t ConnCapacity = 524288;
+  // Every phase is a device kernel, so on CUDA the arenas stay in device
+  // memory: each step moves only the input slice in and the output slice out.
+  static constexpr bool DeviceResident = true;
 };
 static_assert(plastax::NetworkTraits<StaticTraits>);
 
@@ -291,6 +294,7 @@ static double EvalMse(Net &N, const std::vector<std::vector<float>> &X,
   size_t Cnt = 0;
   for (size_t I = 0; I < X.size(); ++I) {
     N.DoForwardPass(X[I]);
+    N.SyncOutputToHost();
     auto Out = N.GetOutput();
     for (size_t J = 0; J < Out.size(); ++J) {
       double D = static_cast<double>(Out[J]) - static_cast<double>(Y[I][J]);
@@ -395,6 +399,7 @@ int main(int Argc, char **Argv) {
   bench::StructuralLog Log(HistPath);
   bench::TestCsvWriter TestCsv("test_mse");
 
+  bench::PullToHost(*N);
   auto Edges = bench::LiveEdgeSet(N->GetConnAlloc());
   double InitVal = EvalMse(*N, Xva, Yva);
   double InitTest = EvalMse(*N, Xte, Yte);
@@ -427,6 +432,7 @@ int main(int Argc, char **Argv) {
       N->DoUpdateConnectionState();
       Timer.MarkUpdate();
       Timer.StepDone();
+      N->SyncOutputToHost();
       auto Out = N->GetOutput();
       for (size_t J = 0; J < Out.size(); ++J) {
         double E = static_cast<double>(Out[J]) - static_cast<double>(D.Y[I][J]);
@@ -437,6 +443,7 @@ int main(int Argc, char **Argv) {
     TrainLoss /= std::max<size_t>(TrainCnt, 1);
     double VaMse = EvalMse(*N, Xva, Yva);
     double EpTest = EvalMse(*N, Xte, Yte);
+    bench::PullToHost(*N);
     auto Ed = bench::LiveEdgeSet(N->GetConnAlloc());
     Log.Log(Ep, N->GetUnitAlloc().Size(),
             bench::LiveEdgeCount(N->GetConnAlloc()), &Ed, &VaMse,
