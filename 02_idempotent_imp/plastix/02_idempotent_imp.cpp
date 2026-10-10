@@ -144,6 +144,9 @@ struct IMPTraits : plastax::DefaultNetworkTraits<> {
   // ~1669 units peak, ~592k initial connections.
   static constexpr size_t UnitCapacity = 4096;
   static constexpr size_t ConnCapacity = 1u << 20; // 1M
+  // Every phase, the armed prune included, is a device kernel, so on CUDA the
+  // arenas stay in device memory. The host reads them only between rounds.
+  static constexpr bool DeviceResident = true;
 };
 static_assert(plastax::NetworkTraits<IMPTraits>);
 
@@ -238,6 +241,7 @@ static double EvalAcc(Net &N, const Dataset &D) {
   size_t Correct = 0;
   for (size_t I = 0; I < D.X.size(); ++I) {
     N.DoForwardPass(D.X[I]);
+    N.SyncOutputToHost();
     auto Out = N.GetOutput();
     size_t Arg = 0;
     for (size_t J = 1; J < Out.size(); ++J)
@@ -252,6 +256,7 @@ static double EvalAcc(Net &N, const Dataset &D) {
 // Compute the threshold at the requested global sparsity *increment*: kth-
 // smallest |w| among currently-alive edges, where k = prune_frac * alive.
 static float ComputeThreshold(Net &N, float PruneFrac) {
+  bench::PullToHost(N);
   auto &CA = N.GetConnAlloc();
   std::vector<float> AliveAbs;
   AliveAbs.reserve(CA.Size());
@@ -386,6 +391,7 @@ int main(int Argc, char **Argv) {
             << " epochs\n";
   TrainEpochs(*N, Train, H.InitEpochs, Rng, Timer);
   double Acc0 = EvalAcc(*N, Test);
+  bench::PullToHost(*N);
   size_t Edges0 = bench::LiveEdgeCount(N->GetConnAlloc());
   auto Edges = bench::LiveEdgeSet(N->GetConnAlloc());
   double Nll0 = 1.0 - Acc0;
@@ -416,6 +422,7 @@ int main(int Argc, char **Argv) {
     N->DoPruneConnections();
     N->Global().PruneArmed = false;
 
+    bench::PullToHost(*N);
     size_t AliveAfter = bench::LiveEdgeCount(N->GetConnAlloc());
     size_t Killed = AliveBefore - AliveAfter;
 
@@ -425,6 +432,7 @@ int main(int Argc, char **Argv) {
     TrainEpochs(*N, Train, H.FinetuneEpochs, Rng, Timer);
 
     double Acc = EvalAcc(*N, Test);
+    bench::PullToHost(*N);
     double Sparsity = 1.0 - static_cast<double>(AliveAfter) /
                                 static_cast<double>(Edges0);
     auto Ed = bench::LiveEdgeSet(N->GetConnAlloc());
